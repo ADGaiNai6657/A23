@@ -12,7 +12,7 @@ from parsers import parse_document
 from schema import Block, RawFact, RawFacts
 from store import Store
 
-MODEL = "deepseek-chat"
+MODEL = "deepseek-flash"
 BATCH_SIZE = 30
 XLSX_MODEL_ROWS = 200
 YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?=年|\b)")

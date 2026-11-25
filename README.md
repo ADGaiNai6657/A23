@@ -1,59 +1,151 @@
 # A23 文档理解与填表
 
-第十七届服创大赛 A23 六周挑战档训练项目。支持四种输入、事实抽取与多源复核、01 城市经济和 03 历史疫情模板填写，以及浏览器逐格追溯。[开发规格](docs/开发规格.md)
+第十七届服创大赛 A23 六周挑战档训练项目。支持 TXT、Markdown、DOCX 和 XLSX 的解析与事实抽取，以及 01 城市经济、03 历史疫情两套 Excel 模板的填写、评估和逐格溯源。[开发规格](docs/开发规格.md)
 
-## 安装和运行
+## 本地运行
 
-在项目根目录执行。项目内已有 `.venv` 时，从第二条命令继续。Node.js 需满足 `^22.18.0 || >=24.12.0`。
+需要 Python 3.14、Node.js `^22.18.0 || >=24.12.0` 和 npm。前端用 Vite 构建，由 FastAPI 在同一地址提供页面和接口。
+
+### macOS 和 Linux
+
+首次运行时克隆项目。已经有本地项目和 `.venv` 时，在项目根目录从安装 Python 依赖开始。
 
 ```sh
+git clone https://github.com/ADGaiNai6657/A23.git
+cd A23
 python3.14 -m venv .venv
 .venv/bin/python -m pip install -r backend/requirements.txt
 npm --prefix frontend ci
 npm --prefix frontend run build
-(cd backend && ../.venv/bin/python -m uvicorn main:app)
+(cd backend && ../.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000)
 ```
 
-打开 <http://127.0.0.1:8000> 使用页面，或打开 <http://127.0.0.1:8000/docs> 调试接口。前端改动后重新构建。后端启动时没有前端构建产物，仍可访问 API。
+### Windows PowerShell
 
-调用真实 DeepSeek 前，在本机创建 `backend/.env` 并设置 `DEEPSEEK_API_KEY`。抽取接口会将分批后的源文档文本发送给 DeepSeek。合成演示、解析、仅导入、03 逐日表填写和回归测试无需密钥。
+以下命令从项目根目录执行。
 
-## 用合成样例演示
+```powershell
+py -3.14 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+npm.cmd --prefix frontend ci
+npm.cmd --prefix frontend run build
+Set-Location backend
+..\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+启动后打开 [应用首页](http://127.0.0.1:8000/)、[接口文档](http://127.0.0.1:8000/docs) 或 [健康检查](http://127.0.0.1:8000/health)。健康检查应返回 `{"ok":true}`。前端改动后重新构建并重启服务。若首页提示前端尚未构建，先检查 `frontend/dist/index.html`。macOS Apple Silicon 和 Debian Linux ARM64 已实测，Windows 命令尚待实机验证。
+
+### 配置 DeepSeek API 密钥
+
+在 DeepSeek 开放平台创建密钥，在项目的 `backend/.env` 中写入以下一行。macOS 可在项目根目录用 `open -a TextEdit backend/.env` 打开已有文件，或在 Finder 按 `⌘⇧.` 显示隐藏文件。保存后重启服务。[DeepSeek API 密钥管理](https://platform.deepseek.com/api_keys)
+
+```dotenv
+DEEPSEEK_API_KEY=你的实际密钥
+```
+
+`backend/.env` 已由 Git 忽略。「抽取事实并入库」会把选中的文档文本分批发给 DeepSeek，使用 `deepseek-flash`。该模型替代了第三周任务书中的 `deepseek-chat`，验收时记录实际使用的模型。解析、仅导入、03 填写和合成演示无需密钥。[DeepSeek 模型与计费](https://api-docs.deepseek.com/quick_start/pricing)
+
+## 用合成样例上手
+
+先停止同端口上已运行的服务。在根目录生成样例，再以演示目录启动。演示数据在 `backend/data/demo/`，与默认数据目录中的日常使用数据分开。
 
 ```sh
 .venv/bin/python backend/demo.py
-.venv/bin/python backend/acceptance.py
-(cd backend && ../.venv/bin/python -m pytest -q)
+(cd backend && A23_DOC_DIR=data/demo/doc A23_DATA_DIR=data/demo/data \
+  ../.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000)
 ```
 
-演示在 `backend/data/demo/` 内生成输入、SQLite、模板副本和两套报告。01 事实来自可复现的合成返回，03 使用合成 XLSX 数据源。页面也可读取这套结果，从项目根目录执行以下命令，再使用表中的文件名。
+Windows PowerShell 在项目根目录打开新终端，执行以下命令。
+
+```powershell
+.\.venv\Scripts\python.exe backend\demo.py
+Set-Location backend
+$env:A23_DOC_DIR = "$PWD\data\demo\doc"
+$env:A23_DATA_DIR = "$PWD\data\demo\data"
+..\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+打开首页，在「填写与验收」选中模板类型并录入表中的文件名，然后点「开始填写」。合成样例已经预填事实库和自检报告，可以直接下载结果或用 Excel 行号和列号追溯来源。
+
+| 模板 | 库里的文档名 | 模板文件名 | 可核对的结果 |
+| --- | --- | --- | --- |
+| 01 城市经济 | `合成城市报告.docx` | `模板_合成城市.xlsx` | 1 行、写入 5 格。第 2 行第 2 列可查 GDP 原文 |
+| 03 历史疫情逐日统计 | `合成逐日统计.xlsx` | `模板_合成逐日.xlsx` | 3 行、写入 19 格、2 格留空。第 3 行第 3 列是有效零值，第 3 行第 4 列可查拒填原因 |
+
+## 用自己的材料
+
+1. 把模板放到项目根目录的 `doc/` 下，保留原始模板和参考表。页面填写的是以「模板」开头、以 `.xlsx` 结尾的文件名，同名模板在材料目录中只能有一份。指定了 `A23_DOC_DIR` 时，将模板放到指定目录。
+2. 在「文档入库」选择源文件。「查看解析块数」支持四种格式，适合先检查结构。要做 01，选城市报告 DOCX，填写可选的逗号分隔指标清单，然后点「抽取事实并入库」。要做 03，选逐日统计 XLSX，点「仅导入文档块」。
+3. 在「填写与验收」选择 01 或 03，核对库里的文档名和模板名，点「开始填写」。完成后可以下载 Excel，以及按行列号查值、原文和拒填理由。页面上的准确率来自最近一次用参考表运行的独立自检。
+4. 如需比较多份文档的事实，在 `/docs` 中调用 `GET /facts`。用主体、指标、期次和口径定位候选。明确来源优先级时指定 `preferred_doc`，可同时查看其余候选。
+
+直接填写目前对应 01 和 03 的模板结构。TXT 和 Markdown 的块编号使用原文行号，DOCX 和 XLSX 使用文档内块序号。XLSX 的块可以全量入库，交给模型抽取的范围是前 200 个非空数据行。03 填表直接使用指定日期区间的结构化数据。
+
+## 部署到 Linux 服务器
+
+下面是使用 systemd 的单机部署。示例使用服务账号 `a23`，项目路径 `/opt/a23`，材料和生成数据分别放在 `/srv/a23/doc` 和 `/var/lib/a23`。先安装上述 Python、Node.js、npm 和 Git，并准备可写的部署目录。
 
 ```sh
-cd backend
-A23_DOC_DIR=data/demo/doc A23_DATA_DIR=data/demo/data ../.venv/bin/python -m uvicorn main:app
+sudo useradd --system --user-group --home-dir /opt/a23 --shell /usr/sbin/nologin a23
+sudo install -d -m 0750 -o a23 -g a23 /opt/a23 /srv/a23/doc /var/lib/a23
+sudo -u a23 -H git clone https://github.com/ADGaiNai6657/A23.git /opt/a23
+sudo -u a23 -H sh -ec '
+  cd /opt/a23
+  python3.14 -m venv .venv
+  .venv/bin/python -m pip install -r backend/requirements.txt
+  npm --prefix frontend ci
+  npm --prefix frontend run build
+'
 ```
 
-| 模板 | 库里的文档名 | 模板文件名 | 合成验收数据 |
-| --- | --- | --- | --- |
-| 01 城市经济 | `合成城市报告.docx` | `模板_合成城市.xlsx` | 1 行、写入 5 格，单元格准确率与行完整率均为 100% |
-| 03 历史疫情 | `合成逐日统计.xlsx` | `模板_合成逐日.xlsx` | 3 行、19 格正确、2 格真空、误填与漏填均为 0 |
+如果账号已经存在，从创建目录开始。首次部署将模板放进 `/srv/a23/doc`，并确保服务账号可读。需要使用模型时，在服务器的 `/opt/a23/backend/.env` 中配置密钥，文件属主设为 `a23`，权限设为 `600`。
 
-点「开始填写」后下载结果，或输入 Excel 行号和列号查询来源。01 的第 2 行第 2 列显示 GDP 的源段落。03 的第 3 行第 3 列展示有效零值，第 3 行第 4 列展示缺值和拒填理由。
+将以下内容保存为 `/etc/systemd/system/a23.service`。
 
-## 样本到位后的验收
+```ini
+[Unit]
+Description=A23 document processing
+After=network.target
 
-1. 将原始材料放入与 `backend/` 同级的 `doc/`，保留任务书中的层级和文件名。
-2. 在页面或 `/docs` 上传并解析四种格式。01 对城市报告执行「抽取事实并入库」。03 对逐日 XLSX 执行「仅导入文档块」。可通过 `GET /facts` 按主体、指标、期次、口径查询候选和采用结果。明确来源文档时可以传 `preferred_doc`，其他候选仍可查询。
-3. 按任务书填写模板、下载结果并核对证据。01 需要人工对照选定的事实及单位，03 需要核对日期区间、国家顺序、真空和所有拒填分类。
-4. 用下列脚本分别跑 01 和 03，传入库内文档名、原模板路径和参考路径。刷新页面查看报告。页面的率取自最近一次独立自检。
+[Service]
+User=a23
+Group=a23
+UMask=0077
+WorkingDirectory=/opt/a23/backend
+Environment=A23_DOC_DIR=/srv/a23/doc
+Environment=A23_DATA_DIR=/var/lib/a23
+ExecStart=/opt/a23/.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now a23
+curl -fsS http://127.0.0.1:8000/health
+sudo journalctl -u a23 -n 50
+```
+
+应用由单个 Uvicorn 进程提供服务，数据库、报告与生成表保存在 `A23_DATA_DIR`。暂停服务时可备份该目录和材料目录。应用自身没有登录，其他机器访问时通过带访问控制和 HTTPS 的反向代理转发到 `127.0.0.1:8000`，并从同一个域名的根路径提供页面与接口。更新时拉取代码、重跑依赖安装和前端构建，再执行 `sudo systemctl restart a23` 和健康检查。
+
+## 验收
+
+在项目根目录运行自动化与合成验收。先构建前端，以便覆盖静态页面路由。
+
+```sh
+.venv/bin/python -m pytest -q backend
+.venv/bin/python backend/acceptance.py
+```
+
+正式材料到位后，按任务书把它们放入 `doc/` 并保留目录层级。在页面将所需文档入库后，用下列脚本填写并评估。根据实际文件名替换三个位置参数。页面刷新后可看到最近一次独立自检的结果。
 
 ```sh
 .venv/bin/python backend/check_fill.py --scenario 01 '库内文档名.docx' '模板路径.xlsx' '参考路径.xlsx'
 .venv/bin/python backend/check_fill.py --scenario 03 '库内文档名.xlsx' '模板路径.xlsx' '参考路径.xlsx'
 ```
 
-`backend/check_extract.py` 支持对指定文件跑通用和清单模式并导出事实。XLSX 全量解析入库，DeepSeek 只处理前 200 条非空数据行。03 的模板结果直接读取目标日期区间的结构化数据。这个范围选择控制模型调用量，范围外的 XLSX 行仍可用于确定性填表。
+若服务使用自定义数据目录，传入同一个 `--data-dir`，例如 `--data-dir /var/lib/a23`。正式验收判据 JSON 的顶层为 `same-db` 和 `rebuilt`，各含 `01`、`03` 的字段与期望值。同库复验用精确值，重建后受模型影响的数值用实测区间 `[下界, 上界]`。执行 `.venv/bin/python backend/acceptance.py --expectations 判据.json --mode same-db` 或将模式改为 `rebuilt`，失败时脚本打印预期值与实测值并返回退出码 1。
 
-正式验收用一份 JSON 记录两个场景的判据，顶层键为 `same-db` 和 `rebuilt`，各含 `01`、`03` 对应的字段和值。区间写成 `[下界, 上界]`。同库复验使用精确值，重建后受模型影响的数值区间由实测确定。执行 `.venv/bin/python backend/acceptance.py --expectations 判据.json --mode same-db` 或将模式改为 `rebuilt`。失败时退出码为 1，并打印失败项、预期值与实测值。
-
-原始样本和参考表尚未到位，当前验收数字来自合成材料。开发规格中的正式块数、行数、分母及跨环境复现需在原始材料上逐项记录。[第四周任务](六周任务/第四周任务.md) · [第六周任务](六周任务/第六周任务.md)
+当前已验证合成材料及一次真实 DeepSeek 合成文本抽取。正式块数、行数、分母与准确率等原始样本到位后验收。[第四周任务](六周任务/第四周任务.md) · [第六周任务](六周任务/第六周任务.md)
