@@ -1,42 +1,60 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from './api'
 
-const city = {
-  doc: '输入_2025中国城市经济百强全景报告.docx',
-  template: '模板_2025中国城市经济百强.xlsx',
-  output: 'filled_2025中国城市经济百强.xlsx',
-  columns: 5,
+const layouts = {
+  city: {
+    label: '01 城市经济',
+    doc: '输入_2025中国城市经济百强全景报告.docx',
+    template: '模板_2025中国城市经济百强.xlsx',
+    output: 'filled_2025中国城市经济百强.xlsx',
+    columns: 5,
+    action: 'extract',
+    guide: '上传城市报告 DOCX，抽取事实后填写 Excel。',
+    rates: [['单元格准确率', 'cell_accuracy'], ['行完整率', 'row_completeness']],
+  },
+  daily: {
+    label: '03 历史疫情逐日统计',
+    doc: '输入_COVID-19全球数据集_节选.xlsx',
+    template: '',
+    output: 'filled_covid19_byday.xlsx',
+    columns: 7,
+    action: 'ingest',
+    guide: '导入逐日统计 XLSX，使用表中数据直接填写。',
+    rates: [['对格率', 'correct_rate'], ['误填率', 'false_fill_rate'], ['漏填率', 'missed_rate']],
+  },
 }
-const daily = {
-  doc: '输入_COVID-19全球数据集_节选.xlsx',
-  template: '',
-  output: 'filled_covid19_byday.xlsx',
-  columns: 7,
-}
+const fileActions = [
+  { id: 'parse', title: '查看解析块数', pending: '正在解析文档' },
+  { id: 'ingest', title: '仅导入文档块', pending: '正在导入文档' },
+  { id: 'extract', title: '抽取事实并入库', pending: '正在抽取事实' },
+]
+const decisions = { filled: '已填写', refused: '已拒填', missing: '没有记录' }
+const connections = { checking: '正在连接', online: '后端在线', offline: '后端未连接' }
+
 const kind = ref('city')
-const source = ref(city.doc)
-const template = ref(city.template)
-const layout = computed(() => kind.value === 'city' ? city : daily)
+const layout = computed(() => layouts[kind.value])
+const source = ref(layout.value.doc)
+const template = ref(layout.value.template)
 const file = ref(null)
+const fileInput = ref(null)
+const dragging = ref(false)
 const metrics = ref('')
-const online = ref(false)
-const pending = ref('')
-const error = ref('')
-const notice = ref('')
+const connection = ref('checking')
+const pending = ref(null)
+const feedback = ref({})
 const result = ref(null)
 const report = ref(null)
-const elapsed = ref(null)
+const resultHeading = ref(null)
 const row = ref(2)
 const column = ref(1)
 const detail = ref(null)
-const activeDoc = ref('')
 
 async function checkHealth() {
   try {
-    online.value = (await api.health()).ok
+    connection.value = (await api.health()).ok ? 'online' : 'offline'
   } catch {
-    online.value = false
+    connection.value = 'offline'
   }
 }
 
@@ -45,66 +63,114 @@ onMounted(checkHealth)
 function selectLayout() {
   source.value = layout.value.doc
   template.value = layout.value.template
-  activeDoc.value = ''
   result.value = report.value = detail.value = null
-  notice.value = error.value = ''
+  row.value = 2
+  column.value = 1
+  feedback.value.fill = feedback.value.detail = null
 }
 
-async function run(label, action) {
-  error.value = notice.value = ''
-  pending.value = label
-  try {
-    await checkHealth()
-    if (!online.value) throw new Error('后端没有响应，请先启动服务')
-    await action()
-  } catch (failure) {
-    error.value = failure.message
-  } finally {
-    pending.value = ''
-  }
-}
-
-function useFile(operation) {
-  if (!file.value) {
-    error.value = '请先选择一份文档'
+function selectFile(selected) {
+  feedback.value.input = null
+  if (!selected) return
+  if (!/\.(txt|md|docx|xlsx)$/i.test(selected.name)) {
+    file.value = null
+    feedback.value.input = { error: true, text: '请选择 TXT、Markdown、DOCX 或 XLSX 文件。' }
     return
   }
-  run({ parse: '解析中', ingest: '导入中', extract: '抽取中' }[operation], async () => {
-    const response = await api[operation](file.value, metrics.value)
-    if (operation === 'extract') {
-      notice.value = `抽到 ${response.count} 条，保留 ${response.kept} 条有证据的事实。`
+  file.value = selected
+}
+
+function onPick(event) {
+  selectFile(event.target.files[0])
+  event.target.value = ''
+}
+
+function onDrop(event) {
+  dragging.value = false
+  if (pending.value) return
+  if (event.dataTransfer.files.length !== 1) {
+    feedback.value.input = { error: true, text: '请一次拖入一份文档。' }
+    return
+  }
+  selectFile(event.dataTransfer.files[0])
+}
+
+function clearFile() {
+  file.value = null
+  feedback.value.input = null
+  fileInput.value?.focus()
+}
+
+async function run(area, label, action) {
+  if (pending.value) return
+  feedback.value[area] = null
+  pending.value = { area, label }
+  try {
+    await checkHealth()
+    if (connection.value !== 'online') throw new Error('后端没有响应，请启动服务后重试。')
+    await action()
+  } catch (failure) {
+    feedback.value[area] = { error: true, text: failure.message }
+  } finally {
+    pending.value = null
+  }
+}
+
+function useFile(action) {
+  if (!file.value) {
+    feedback.value.input = { error: true, text: '请先选择一份文档。' }
+    fileInput.value?.focus()
+    return
+  }
+  return run('input', action.pending, async () => {
+    const response = await api[action.id](file.value, metrics.value)
+    let text
+    if (action.id === 'extract') {
+      text = `抽到 ${response.count} 条，保留 ${response.kept} 条有证据的事实。`
     } else {
-      const count = operation === 'parse' ? response.blocks.length : response.blocks
-      notice.value = `${operation === 'parse' ? '解析' : '导入'}完成，共 ${count} 个块。`
+      const count = action.id === 'parse' ? response.blocks.length : response.blocks
+      text = `${action.id === 'parse' ? '解析' : '导入'}完成，共 ${count} 个块。`
     }
-    if (operation !== 'parse') source.value = response.doc
+    if (action.id !== 'parse') source.value = response.doc
+    feedback.value.input = { text }
   })
 }
 
 async function fill() {
   if (!source.value.trim() || !template.value.trim()) {
-    error.value = '请输入文档名和模板文件名'
+    feedback.value.fill = { error: true, text: '请输入文档名和模板文件名。' }
     return
   }
-  result.value = report.value = detail.value = null
-  await run('填写中', async () => {
-    activeDoc.value = source.value.trim()
+  await run('fill', '正在填写表格', async () => {
+    const doc = source.value.trim()
     const started = performance.now()
-    result.value = await api.fill(activeDoc.value, template.value.trim())
-    elapsed.value = ((performance.now() - started) / 1000).toFixed(2)
+    const summary = await api.fill(doc, template.value.trim())
+    result.value = {
+      doc,
+      ...summary,
+      elapsed: ((performance.now() - started) / 1000).toFixed(2),
+    }
+    report.value = detail.value = null
+    feedback.value.detail = null
+    row.value = 2
+    column.value = 1
     try {
-      report.value = await api.reports(activeDoc.value, layout.value.output)
+      report.value = await api.reports(doc, layout.value.output)
     } catch (failure) {
       if (failure.status !== 404) throw failure
-      notice.value = '表格已填写，暂无这份文档的自检报告。'
     }
+    feedback.value.fill = { text: `填写完成，共 ${summary.rows} 行。` }
   })
+  if (result.value && !feedback.value.fill?.error) {
+    await nextTick()
+    resultHeading.value?.focus()
+  }
 }
 
 function inspectCell() {
   detail.value = null
-  return run('查询中', async () => {
-    detail.value = await api.cell(activeDoc.value, layout.value.output, row.value, column.value)
+  return run('detail', '正在查询单元格', async () => {
+    detail.value = await api.cell(result.value.doc, layout.value.output, row.value, column.value)
   })
 }
 
@@ -114,101 +180,197 @@ function percent(value) {
 </script>
 
 <template>
-  <main>
-    <header>
+  <a class="skip-link" href="#workspace">跳到工作区</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">A23</span>
+        <span>文档工作台</span>
+      </div>
+      <div class="toolbar">
+        <span class="connection" :data-state="connection" role="status">
+          <span class="connection-dot" aria-hidden="true"></span>
+          {{ connections[connection] }}
+        </span>
+        <a class="docs-link" :href="api.docs" target="_blank" rel="noopener" aria-label="接口文档（在新标签页打开）">
+          接口文档 <span aria-hidden="true">↗</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main id="workspace" class="workspace" tabindex="-1">
+    <header class="page-title">
       <h1>文档理解与填表</h1>
-      <p :class="online ? 'online' : 'offline'">{{ online ? '后端在线' : '后端未连接' }}</p>
+      <p>从源文件提取事实，填写 Excel，再逐格核对出处。</p>
     </header>
-    <p v-if="pending" role="status">{{ pending }}…</p>
-    <p v-if="notice" role="status">{{ notice }}</p>
-    <p v-if="error" class="offline" role="alert">{{ error }}</p>
 
-    <section>
-      <h2>文档入库</h2>
-      <fieldset :disabled="Boolean(pending)">
-        <label>选择文档 <input type="file" accept=".txt,.md,.docx,.xlsx" @change="file = $event.target.files[0]"></label>
-        <label>指定抽取指标 <input v-model="metrics" placeholder="可选，逗号分隔"></label>
-        <div class="actions">
-          <button @click="useFile('parse')">查看解析块数</button>
-          <button @click="useFile('ingest')">仅导入文档块</button>
-          <button class="primary" @click="useFile('extract')">抽取事实并入库</button>
-        </div>
-      </fieldset>
-    </section>
+    <div class="workflow">
+      <section class="panel panel-input" aria-labelledby="input-heading">
+        <header class="panel-heading">
+          <span class="panel-icon" aria-hidden="true"><span class="icon icon-document"></span></span>
+          <div>
+            <h2 id="input-heading">文档入库</h2>
+            <p>解析可预览文档结构，入库后可用于填表。</p>
+          </div>
+        </header>
 
-    <section>
-      <h2>填写与验收</h2>
-      <form @submit.prevent="fill">
-        <fieldset :disabled="Boolean(pending)">
-          <label>模板类型
-            <select v-model="kind" @change="selectLayout">
-              <option value="city">01 城市经济</option>
-              <option value="daily">03 历史疫情逐日统计</option>
-            </select>
+        <fieldset class="input-controls" :disabled="Boolean(pending)">
+          <div
+            class="upload"
+            :class="{ 'is-dragging': dragging, 'has-file': file }"
+            @dragover.prevent="dragging = !pending"
+            @dragleave="!$event.currentTarget.contains($event.relatedTarget) && (dragging = false)"
+            @drop.prevent="onDrop"
+          >
+            <label class="upload-target" for="source-file">
+              <span class="upload-icon" aria-hidden="true"><span class="icon icon-upload">↑</span></span>
+              <span class="upload-copy">
+                <span class="upload-title">{{ file ? file.name : '选择文档' }}</span>
+                <span class="upload-hint" id="file-hint">{{ file ? '点击或拖入新文件可替换' : '拖放或点击选择 · TXT、Markdown、DOCX、XLSX' }}</span>
+              </span>
+              <input
+                id="source-file"
+                ref="fileInput"
+                class="file-input"
+                type="file"
+                accept=".txt,.md,.docx,.xlsx"
+                aria-label="选择文档"
+                aria-describedby="file-hint"
+                @change="onPick"
+              >
+            </label>
+            <button v-if="file" class="remove-file" type="button" aria-label="移除已选文档" @click="clearFile">×</button>
+          </div>
+
+          <label class="field" for="metrics">
+            <span>指定抽取指标 <span class="optional">可选</span></span>
+            <input id="metrics" v-model="metrics" type="text" placeholder="例如 GDP, 常住人口">
           </label>
-          <label>库里的文档名 <input v-model="source" required></label>
-          <label>模板文件名 <input v-model="template" required></label>
-          <button class="primary">开始填写</button>
-        </fieldset>
-      </form>
-      <div v-if="result">
-        <dl>
-          <div><dt>数据行</dt><dd>{{ result.rows }}</dd></div>
-          <div><dt>写入</dt><dd>{{ result.cells_written }}</dd></div>
-          <div><dt>空格</dt><dd>{{ result.cells_empty }}</dd></div>
-          <div><dt>填写耗时</dt><dd>{{ elapsed }} 秒</dd></div>
-        </dl>
-        <div v-if="report">
-          <p>以下数值来自最近一次自检。</p>
-          <p v-if="kind === 'city'">单元格准确率 {{ percent(report.cell_accuracy) }} · 行完整率 {{ percent(report.row_completeness) }}</p>
-          <p v-else>对格率 {{ percent(report.correct_rate) }} · 误填率 {{ percent(report.false_fill_rate) }} · 漏填率 {{ percent(report.missed_rate) }}</p>
-        </div>
-        <a :href="api.download(layout.output)" download>下载填写结果</a>
 
-        <form class="inspect" @submit.prevent="inspectCell">
-          <fieldset :disabled="Boolean(pending)">
-            <legend>逐格追溯</legend>
-            <label>Excel 行号 <input v-model.number="row" type="number" min="2" :max="result.rows + 1" required></label>
-            <label>Excel 列号 <input v-model.number="column" type="number" min="1" :max="layout.columns" required></label>
-            <button>查看详情</button>
+          <div class="file-actions">
+            <button
+              v-for="action in fileActions"
+              :key="action.id"
+              class="button"
+              :class="action.id === layout.action ? 'button-primary' : 'button-secondary'"
+              type="button"
+              @click="useFile(action)"
+            >{{ action.title }}</button>
+          </div>
+        </fieldset>
+
+        <p v-if="feedback.input?.error" class="feedback feedback-error" role="alert">{{ feedback.input.text }}</p>
+        <p v-else class="feedback" role="status">{{ pending?.area === 'input' ? `${pending.label}…` : feedback.input?.text }}</p>
+      </section>
+
+      <section class="panel panel-fill" aria-labelledby="fill-heading">
+        <header class="panel-heading">
+          <span class="panel-icon" aria-hidden="true"><span class="icon icon-grid"></span></span>
+          <div>
+            <h2 id="fill-heading">填写与验收</h2>
+            <p>{{ layout.guide }}</p>
+          </div>
+        </header>
+
+        <form @submit.prevent="fill">
+          <fieldset class="fill-controls" :disabled="Boolean(pending)">
+            <fieldset class="scenario">
+              <legend>模板类型</legend>
+              <div class="scenario-options">
+                <label v-for="(option, key) in layouts" :key="key" class="scenario-option">
+                  <input v-model="kind" type="radio" name="scenario" :value="key" @change="selectLayout">
+                  <span>{{ option.label }}</span>
+                </label>
+              </div>
+            </fieldset>
+            <div class="fill-fields">
+              <label class="field" for="doc-name">
+                <span>库里的文档名</span>
+                <input id="doc-name" v-model="source" type="text" required>
+              </label>
+              <label class="field" for="template-name">
+                <span>模板文件名</span>
+                <input id="template-name" v-model="template" type="text" placeholder="模板_文件名.xlsx" required>
+              </label>
+            </div>
+            <button class="button button-primary fill-button" type="submit">
+              {{ pending?.area === 'fill' ? '正在填写…' : '开始填写' }}
+              <span v-if="pending?.area !== 'fill'" aria-hidden="true">→</span>
+            </button>
           </fieldset>
         </form>
-        <div v-if="detail" class="detail">
-          <p>{{ { filled: '已填写', refused: '已拒填', missing: '没有记录' }[detail.decision] }} · {{ detail.reason }}</p>
-          <p v-if="detail.value != null">填写值 {{ detail.value }}</p>
-          <p v-if="detail.evaluation">最近自检判定 {{ detail.evaluation }}</p>
-          <p v-if="detail.source">{{ detail.source.doc }} · 第 {{ detail.source.block_no }} 块</p>
-          <blockquote v-if="detail.text">{{ detail.text }}</blockquote>
+
+        <p v-if="feedback.fill?.error" class="feedback feedback-error" role="alert">{{ feedback.fill.text }}</p>
+        <p v-else class="feedback" role="status">{{ pending?.area === 'fill' ? `${pending.label}…` : feedback.fill?.text }}</p>
+      </section>
+    </div>
+
+    <section class="panel results" aria-labelledby="result-heading">
+      <header class="panel-heading result-header">
+        <span class="panel-icon" aria-hidden="true"><span class="icon icon-result"></span></span>
+        <div>
+          <h2 id="result-heading" ref="resultHeading" tabindex="-1">填写结果</h2>
+          <p v-if="result" class="result-document">{{ result.doc }}</p>
+          <p v-else>填写完成后可下载 Excel，并检查每个单元格的来源。</p>
         </div>
-      </div>
+        <a v-if="result" class="button button-secondary download" :href="api.download(layout.output)" download>
+          <span aria-hidden="true">↓</span> 下载填写结果
+        </a>
+      </header>
+
+      <template v-if="result">
+        <dl class="stats">
+          <div><dt>数据行</dt><dd>{{ result.rows }}</dd></div>
+          <div><dt>写入格数</dt><dd>{{ result.cells_written }}</dd></div>
+          <div><dt>空格</dt><dd>{{ result.cells_empty }}</dd></div>
+          <div><dt>填写耗时</dt><dd>{{ result.elapsed }} <span>秒</span></dd></div>
+        </dl>
+        <div v-if="report" class="report">
+          <p>最近一次自检</p>
+          <dl class="rates">
+            <div v-for="[label, key] in layout.rates" :key="key">
+              <dt>{{ label }}</dt>
+              <dd>{{ percent(report[key]) }}</dd>
+            </div>
+          </dl>
+        </div>
+        <p v-else class="report-empty">暂无这份文档的自检报告。</p>
+
+        <div class="trace">
+          <form @submit.prevent="inspectCell">
+            <fieldset :disabled="Boolean(pending)">
+              <legend>逐格追溯</legend>
+              <div class="trace-fields">
+                <label class="field" for="row">
+                  <span>Excel 行号</span>
+                  <input id="row" v-model.number="row" type="number" min="2" :max="result.rows + 1" required>
+                </label>
+                <label class="field" for="column">
+                  <span>Excel 列号</span>
+                  <input id="column" v-model.number="column" type="number" min="1" :max="layout.columns" required>
+                </label>
+                <button class="button button-secondary" type="submit">查看详情</button>
+              </div>
+            </fieldset>
+          </form>
+          <p v-if="feedback.detail?.error" class="feedback feedback-error" role="alert">{{ feedback.detail.text }}</p>
+          <p v-else class="feedback" role="status">{{ pending?.area === 'detail' ? `${pending.label}…` : '' }}</p>
+          <div aria-live="polite">
+            <div v-if="detail" class="detail">
+              <div class="detail-heading">
+                <strong class="decision" :data-decision="detail.decision">{{ decisions[detail.decision] }}</strong>
+                <span v-if="detail.value != null" class="detail-value">填写值 {{ detail.value }}</span>
+              </div>
+              <p>{{ detail.reason }}</p>
+              <p v-if="detail.evaluation">最近自检判定 {{ detail.evaluation }}</p>
+              <p v-if="detail.source">{{ detail.source.doc }} · 第 {{ detail.source.block_no }} 块</p>
+              <blockquote v-if="detail.text">{{ detail.text }}</blockquote>
+            </div>
+          </div>
+        </div>
+      </template>
     </section>
   </main>
 </template>
-
-<style>
-:root { font: 16px/1.55 system-ui, sans-serif; color: #173129; background: #f0f4ef; }
-* { box-sizing: border-box; }
-body { margin: 0; }
-main { max-width: 850px; margin: auto; padding: 2rem 1rem 4rem; }
-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: .5rem; }
-h1 { font-size: clamp(1.8rem, 5vw, 2.6rem); margin: 0 0 1rem; }
-h2 { margin-top: 0; font-size: 1.25rem; }
-section { background: white; border: 1px solid #cdd9d0; border-radius: 12px; margin-bottom: 1rem; padding: 1.25rem; }
-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
-label { display: block; margin-bottom: .7rem; }
-input, select, button { font: inherit; border: 1px solid #9caf9f; border-radius: 6px; padding: .45rem .7rem; background: #fff; color: inherit; }
-label input, label select { display: block; width: 100%; margin-top: .25rem; }
-.actions { display: flex; flex-wrap: wrap; gap: .5rem; }
-button, a { cursor: pointer; }
-.primary { background: #174c37; color: white; }
-.online, a { color: #176047; }
-.offline { color: #9d261a; }
-dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: .5rem; }
-dl div, .detail { background: #edf4ee; padding: .6rem .8rem; border-radius: 6px; }
-dd { margin: 0; font-size: 1.35rem; }
-.inspect { margin-top: 1rem; }
-.inspect fieldset { display: flex; flex-wrap: wrap; gap: .5rem; align-items: start; }
-.inspect input { max-width: 120px; }
-.detail { margin-top: .75rem; overflow-wrap: anywhere; }
-blockquote { border-left: 3px solid #8aab98; margin-left: 0; padding-left: .8rem; white-space: pre-wrap; }
-</style>

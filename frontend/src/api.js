@@ -1,12 +1,18 @@
 async function send(path, options) {
-  const response = await fetch(path, options)
-  const payload = await response.json()
+  let response
+  try {
+    response = await fetch(path, options)
+  } catch (error) {
+    throw new Error('无法连接后端，请稍后重试。', { cause: error })
+  }
+  const payload = await response.json().catch(() => null)
   if (!response.ok) {
     throw Object.assign(
-      new Error(typeof payload.detail === 'string' ? payload.detail : '请求参数或服务响应有误'),
+      new Error(typeof payload?.detail === 'string' ? payload.detail : '请求参数或服务响应有误。'),
       { status: response.status },
     )
   }
+  if (!payload) throw new Error('后端返回的数据格式有误。')
   return payload
 }
 
@@ -22,6 +28,7 @@ function params(values) {
 }
 
 export const api = {
+  docs: '/docs',
   health: () => send('/health'),
   parse: (file) => upload('/parse', file),
   ingest: (file) => upload('/ingest', file),
