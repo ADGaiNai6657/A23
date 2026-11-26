@@ -13,6 +13,10 @@ async function send(path, options) {
     )
   }
   if (!payload) throw new Error('后端返回的数据格式有误。')
+  const source = response.headers.get('X-A23-Source-SHA256')
+  const result = response.headers.get('X-A23-Result-ID')
+  if (source) payload.source_sha256 = source
+  if (result) payload.result_id = result
   return payload
 }
 
@@ -33,12 +37,12 @@ export const api = {
   parse: (file) => upload('/parse', file),
   ingest: (file) => upload('/ingest', file),
   extract: (file, metrics) => upload('/extract', file, metrics),
-  fill: (doc, template) => send('/fill', {
+  fill: (doc, template, sourceSha256) => send('/fill', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ doc, template }),
+    body: JSON.stringify({ doc, template, source_sha256: sourceSha256 }),
   }),
-  reports: (doc, file) => send('/reports?' + params({ doc, file })),
-  cell: (doc, file, row, column) => send('/cells?' + params({ doc, file, row, column })),
+  reports: (doc, file, resultId) => send('/reports?' + params({ doc, file, result_id: resultId })),
+  cell: (doc, file, row, column, resultId) => send('/cells?' + params({ doc, file, row, column, result_id: resultId })),
   download: (name) => '/files?' + params({ name }),
 }

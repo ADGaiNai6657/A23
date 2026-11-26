@@ -27,7 +27,7 @@ def main() -> None:
     rows = None if args.synthetic else 2542 if covid else 100
     grading = evaluate(
         args.data_dir / output, args.reference, args.data_dir / report, args.doc, covid,
-        expected_rows=rows, block_count=len(store.blocks(args.doc)),
+        expected_rows=rows, block_count=len(store.blocks(args.doc)), database=store.path,
     )
     print(json.dumps({**filled, **{key: value for key, value in grading.items() if key != "diff"}},
                      ensure_ascii=False, indent=2))

@@ -6,6 +6,10 @@ from decimal import Decimal, InvalidOperation
 CITY_TEMPLATE = "模板_2025中国城市经济百强.xlsx"
 CITY_OUTPUT = "filled_2025中国城市经济百强.xlsx"
 COVID_OUTPUT = "filled_covid19_byday.xlsx"
+REPORT_FILES = {
+    CITY_OUTPUT: ("fill_report.json", "eval_report.json", "source_report.json"),
+    COVID_OUTPUT: ("fill_report_covid19.json", "eval_report_covid19.json", "source_report_covid19.json"),
+}
 COVID_START = date(2020, 7, 1)
 COVID_END = date(2020, 8, 31)
 
@@ -42,6 +46,10 @@ METRIC_ALIASES = {
 }
 COUNTRY_KEYS = ("location", "country", "countryregion", "countryname", "国家或地区", "国家地区", "国家", "国家名称", "国家或地区名称")
 DATE_KEYS = ("date", "日期", "统计日期")
+DAILY_METRIC_KEYS = {
+    "continent", "gdp_per_capita", "population", "每日检测数", "病例数",
+    "new_cases", "new_deaths", "total_cases", "total_deaths",
+}
 
 
 def normalize(value: str) -> str:

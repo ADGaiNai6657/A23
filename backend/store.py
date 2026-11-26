@@ -49,17 +49,31 @@ class Store:
         digest = hashlib.sha256(content).hexdigest()
         if parsed.file.lower().endswith((".txt", ".md")):
             digest = "line-number:" + digest
+        incoming = [
+            (block_no, block.type, block.text, json.dumps(block.locator, ensure_ascii=False, sort_keys=True))
+            for block_no, block in parsed.numbered_blocks()
+        ]
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             current = db.execute(
                 "SELECT digest FROM documents WHERE name = ?", (parsed.file,),
             ).fetchone()
-            if current is None or current["digest"] != digest:
+            same_blocks = False
+            if current is not None and current["digest"] == digest:
+                saved = [
+                    (row["number"], row["type"], row["text"],
+                     json.dumps(json.loads(row["locator"]), ensure_ascii=False, sort_keys=True))
+                    for row in db.execute(
+                        "SELECT number, type, text, locator FROM blocks WHERE doc = ? ORDER BY number",
+                        (parsed.file,),
+                    )
+                ]
+                same_blocks = saved == incoming
+            if not same_blocks:
                 db.execute("DELETE FROM documents WHERE name = ?", (parsed.file,))
                 db.execute("INSERT INTO documents VALUES (?, ?, ?)", (parsed.file, digest, content))
                 db.executemany("INSERT INTO blocks VALUES (?, ?, ?, ?, ?)", (
-                    (parsed.file, block_no, block.type, block.text, json.dumps(block.locator, ensure_ascii=False))
-                    for block_no, block in parsed.numbered_blocks()
+                    (parsed.file, *block) for block in incoming
                 ))
             if mode is not None:
                 db.execute("DELETE FROM facts WHERE doc = ? AND mode = ?", (parsed.file, mode))
@@ -74,25 +88,43 @@ class Store:
 
     def blocks(self, doc: str) -> list[dict]:
         with self.connect() as db:
-            return [
-                {**dict(row), "locator": json.loads(row["locator"])}
-                for row in db.execute("SELECT * FROM blocks WHERE doc = ? ORDER BY number", (doc,))
-            ]
+            return self._blocks(db, doc)
+
+    @staticmethod
+    def _blocks(db, doc: str) -> list[dict]:
+        return [
+            {**dict(row), "locator": json.loads(row["locator"])}
+            for row in db.execute("SELECT * FROM blocks WHERE doc = ? ORDER BY number", (doc,))
+        ]
 
     def facts(self, doc: str | None = None) -> list[dict]:
         with self.connect() as db:
-            statement = "SELECT * FROM facts"
-            args = ()
-            if doc is not None:
-                statement += " WHERE doc = ?"
-                args = (doc,)
-            return [dict(row) for row in db.execute(
-                statement + " ORDER BY doc, block_no, rowid", args,
-            )]
+            return self._facts(db, doc)
+
+    @staticmethod
+    def _facts(db, doc: str | None) -> list[dict]:
+        statement = "SELECT * FROM facts"
+        args = ()
+        if doc is not None:
+            statement += " WHERE doc = ?"
+            args = (doc,)
+        return [dict(row) for row in db.execute(statement + " ORDER BY doc, block_no, rowid", args)]
+
+    def snapshot(self, doc: str, *, with_facts: bool) -> tuple[bytes, list[dict], list[dict]] | None:
+        with self.connect() as db:
+            db.execute("BEGIN")
+            row = db.execute("SELECT content FROM documents WHERE name = ?", (doc,)).fetchone()
+            if row is None:
+                return None
+            return row["content"], self._blocks(db, doc), self._facts(db, doc) if with_facts else []
 
     def block(self, doc: str, number: int) -> dict | None:
         with self.connect() as db:
             row = db.execute(
-                "SELECT * FROM blocks WHERE doc = ? AND number = ?", (doc, number),
+                """
+                SELECT blocks.*, documents.digest AS document_digest
+                FROM blocks JOIN documents ON documents.name = blocks.doc
+                WHERE blocks.doc = ? AND number = ?
+                """, (doc, number),
             ).fetchone()
             return {**dict(row), "locator": json.loads(row["locator"])} if row else None

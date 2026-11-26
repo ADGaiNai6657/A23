@@ -1,0 +1,146 @@
+{
+  "basis": "controlled-regression",
+  "queries": {
+    "同口径拒绝": {
+      "candidates": [
+        {
+          "doc": "乙.txt",
+          "mode": "general",
+          "block_no": 3,
+          "entity": "甲城",
+          "metric": "GDP",
+          "metric_key": "gdp",
+          "value": "11",
+          "value_num": "11",
+          "unit": "亿元",
+          "snippet": "GDP11亿元",
+          "period": "2024",
+          "period_block_no": 1,
+          "scope": "",
+          "adopted": false,
+          "period_source": {
+            "line": 1
+          }
+        },
+        {
+          "doc": "甲.txt",
+          "mode": "general",
+          "block_no": 3,
+          "entity": "甲城",
+          "metric": "GDP",
+          "metric_key": "gdp",
+          "value": "10",
+          "value_num": "10",
+          "unit": "亿元",
+          "snippet": "GDP10亿元",
+          "period": "2024",
+          "period_block_no": 1,
+          "scope": "",
+          "adopted": false,
+          "period_source": {
+            "line": 1
+          }
+        }
+      ],
+      "selected": null,
+      "reason": "同口径来源存在不同值，缺少裁决依据"
+    },
+    "指定来源采用": {
+      "candidates": [
+        {
+          "doc": "乙.txt",
+          "mode": "general",
+          "block_no": 3,
+          "entity": "甲城",
+          "metric": "GDP",
+          "metric_key": "gdp",
+          "value": "11",
+          "value_num": "11",
+          "unit": "亿元",
+          "snippet": "GDP11亿元",
+          "period": "2024",
+          "period_block_no": 1,
+          "scope": "",
+          "adopted": true,
+          "period_source": {
+            "line": 1
+          }
+        },
+        {
+          "doc": "甲.txt",
+          "mode": "general",
+          "block_no": 3,
+          "entity": "甲城",
+          "metric": "GDP",
+          "metric_key": "gdp",
+          "value": "10",
+          "value_num": "10",
+          "unit": "亿元",
+          "snippet": "GDP10亿元",
+          "period": "2024",
+          "period_block_no": 1,
+          "scope": "",
+          "adopted": false,
+          "period_source": {
+            "line": 1
+          }
+        }
+      ],
+      "selected": {
+        "doc": "乙.txt",
+        "mode": "general",
+        "block_no": 3,
+        "entity": "甲城",
+        "metric": "GDP",
+        "metric_key": "gdp",
+        "value": "11",
+        "value_num": "11",
+        "unit": "亿元",
+        "snippet": "GDP11亿元",
+        "period": "2024",
+        "period_block_no": 1,
+        "scope": ""
+      },
+      "reason": "采用指定来源文档 乙.txt"
+    },
+    "另一期次": {
+      "candidates": [
+        {
+          "doc": "丙.txt",
+          "mode": "general",
+          "block_no": 3,
+          "entity": "甲城",
+          "metric": "GDP",
+          "metric_key": "gdp",
+          "value": "21",
+          "value_num": "21",
+          "unit": "亿元",
+          "snippet": "GDP21亿元",
+          "period": "2025",
+          "period_block_no": 1,
+          "scope": "",
+          "adopted": true,
+          "period_source": {
+            "line": 1
+          }
+        }
+      ],
+      "selected": {
+        "doc": "丙.txt",
+        "mode": "general",
+        "block_no": 3,
+        "entity": "甲城",
+        "metric": "GDP",
+        "metric_key": "gdp",
+        "value": "21",
+        "value_num": "21",
+        "unit": "亿元",
+        "snippet": "GDP21亿元",
+        "period": "2025",
+        "period_block_no": 1,
+        "scope": ""
+      },
+      "reason": "采用唯一符合口径的来源"
+    }
+  }
+}

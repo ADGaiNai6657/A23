@@ -1,12 +1,16 @@
+import json
 import math
+from io import BytesIO
 from datetime import date, datetime
+from hashlib import sha256
 from itertools import zip_longest
 from numbers import Real
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.utils.datetime import from_excel
 
-from fill_spec import CITY_HEADERS
+from fill_spec import CITY_HEADERS, DATE_KEYS, REPORT_FILES, normalize
 from filler import write_json
 
 
@@ -26,13 +30,40 @@ def matches(actual: object, expected: object) -> bool:
     return actual == expected
 
 
+def excel_day(value: object, epoch: datetime) -> object:
+    if isinstance(value, Real) and not isinstance(value, bool):
+        try:
+            value = from_excel(value, epoch)
+        except (OverflowError, ValueError):
+            return value
+    return value.date() if isinstance(value, datetime) else value
+
+
+def scoring_origin(filled: Path, content: bytes) -> dict:
+    filenames = REPORT_FILES.get(filled.name)
+    if filenames is None:
+        return {}
+    trace = json.loads(filled.with_name(filenames[0]).read_text(encoding="utf-8"))
+    if trace.get("workbook_sha256") != sha256(content).hexdigest() or not trace.get("result_id"):
+        raise ValueError("工作簿与本次逐格结果版本不一致，请重新填写后评分")
+    return {
+        key: trace[key] for key in (
+            "result_id", "run_id", "source_sha256", "template_sha256", "workbook_sha256",
+        )
+    }
+
+
 def evaluate(
     filled: Path, reference: Path, report: Path, doc: str, covid: bool,
     expected_rows: int | None = None, block_count: int | None = None,
+    database: Path | None = None,
 ) -> dict:
-    result_book = load_workbook(filled, read_only=True, data_only=True)
+    filled_content = filled.read_bytes()
+    identity = scoring_origin(filled, filled_content)
+    reference_content = reference.read_bytes()
+    result_book = load_workbook(BytesIO(filled_content), read_only=True, data_only=True)
     try:
-        reference_book = load_workbook(reference, read_only=True, data_only=True)
+        reference_book = load_workbook(BytesIO(reference_content), read_only=True, data_only=True)
         try:
             actual = result_book.active
             expected = reference_book.active
@@ -42,6 +73,13 @@ def evaluate(
                 raise ValueError("参考结果行数与验收范围不符")
             if expected.max_column != width:
                 raise ValueError("参考结果列数与验收范围不符")
+            if actual.max_column != width or actual.max_row != count + 1:
+                raise ValueError("填写结果的行列数与验收范围不符")
+            columns = next(actual.iter_rows(max_row=1, values_only=True))
+            date_columns = {
+                column for column, title in enumerate(columns, 1)
+                if covid and normalize(str(title)) in DATE_KEYS
+            }
             actual_rows = actual.iter_rows(min_row=2, max_row=count + 1, max_col=width, values_only=True)
             expected_rows_iter = expected.iter_rows(min_row=2, max_row=count + 1, max_col=width, values_only=True)
             differences = []
@@ -51,6 +89,9 @@ def evaluate(
                 complete += all(value is not None for value in seen)
                 same_city += matches(seen[0], target[0])
                 for column, (value, truth) in enumerate(zip(seen, target), 1):
+                    if column in date_columns:
+                        value = excel_day(value, result_book.epoch)
+                        truth = excel_day(truth, reference_book.epoch)
                     allowed_empty += truth is None
                     written += value is not None
                     matched = matches(value, truth)
@@ -65,9 +106,14 @@ def evaluate(
             output = {
                 "doc": doc, "file": filled.name, "rows": actual.max_row - 1,
                 "cells_written": written, "cells_empty": total - written, "diff": differences,
+                "basis": "reference-workbook",
+                "reference_sha256": sha256(reference_content).hexdigest(),
+                **identity,
             }
             if block_count is not None:
                 output["block_count"] = block_count
+            if database is not None:
+                output["database_sha256"] = sha256(database.read_bytes()).hexdigest()
             if covid:
                 required = total - allowed_empty
                 output.update({

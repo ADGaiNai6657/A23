@@ -1,7 +1,7 @@
 from collections.abc import Iterator
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Block(BaseModel):
@@ -24,19 +24,25 @@ class RawFact(BaseModel):
     block_no: int
     entity: str = ""
     metric: str = Field(min_length=1)
-    value: str = Field(min_length=1)
+    value: str = Field(min_length=1, coerce_numbers_to_str=True)
     unit: str = ""
     snippet: str = Field(min_length=1)
     scope: str = ""
 
+    @field_validator("entity", "unit", "scope", mode="before")
+    @classmethod
+    def optional_text(cls, value):
+        return "" if value is None else value
+
 
 class RawFacts(BaseModel):
-    facts: list[RawFact]
+    facts: list[object]
 
 
 class FillRequest(BaseModel):
     doc: str
     template: str
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 Mode = Literal["general", "list"]

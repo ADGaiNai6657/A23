@@ -1,19 +1,24 @@
 import json
 from datetime import datetime
+from hashlib import sha256
 from io import BytesIO
 
 import pytest
 from docx import Document
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils.datetime import to_excel
 
 import main
-from acceptance import check
-from demo import CITY_DOC, CITY_TEMPLATE, DAILY_DOC, build_demo
+from acceptance import check, checked_rules
+from check_extract import export_facts
+from demo import CITY_DOC, CITY_TEMPLATE, DAILY_DOC, DAILY_TEMPLATE, build_demo, make_workbook
+from evaluate import evaluate
 from extractor import extract_document
-from fill_spec import CITY_OUTPUT, COVID_OUTPUT
-from filler import resolve_facts
+from fill_spec import CITY_COLUMNS, CITY_OUTPUT, COVID_OUTPUT
+from filler import city_value, fill_workbook, resolve_facts, write_json
 from parsers import parse_document
+from schema import Block, ParsedDoc
 from store import Store
 
 
@@ -187,3 +192,168 @@ def test_acceptance_detects_changed_value_key_or_missing_report(actual):
     failures = check({"01": actual}, {"01": {"rows": 1}})
     assert len(failures) == 1
     assert failures[0].startswith("01")
+
+
+def test_same_xlsx_bytes_refresh_old_blocks_and_remove_dependent_facts(tmp_path):
+    store = Store(tmp_path / "a23.db")
+    path = tmp_path / "数据.xlsx"
+    make_workbook(path, ("B", None), [(11, 22)])
+    content = path.read_bytes()
+    block = Block(type="spreadsheet_row", text="B: 22", locator={"sheet": "Sheet", "row": 2})
+    old = ParsedDoc(file=path.name, blocks=[block])
+    fact = (1, "甲", "B", "b", "22", "22", "", "B: 22", "", None, "")
+    store.save(old, content, "general", [fact])
+    parsed = parse_document(content, path.name)
+    store.save(parsed, content)
+    store.save(parsed, content)
+    assert [item["text"] for item in store.blocks(path.name)] == ["B: 11｜列 B: 22"]
+    assert store.facts(path.name) == []
+
+
+@pytest.mark.parametrize("index,value,number,unit,quote,expected", [
+    (0, "100", "100", "", "GDP 100 亿元", 100),
+    (1, "1,295.80 万人口", None, "", "1,295.80 万人口", 1295.8),
+    (0, "100", None, "万元", "GDP 100 万元", None),
+    (0, "100", None, "", "GDP 100 万元", None),
+])
+def test_city_unit_evidence_and_number_fallback(index, value, number, unit, quote, expected):
+    fact = {"value": value, "value_num": number, "unit": unit, "snippet": quote}
+    result = city_value(fact, CITY_COLUMNS[index])
+    assert (float(result) if result is not None else None) == expected
+
+
+@pytest.mark.parametrize("alias,expected", [(None, 10), (2, None), (10, 10)])
+def test_daily_synonym_conflict_is_traced_without_per_million_collision(tmp_path, alias, expected):
+    source = tmp_path / "原文.xlsx"
+    template = tmp_path / "模板.xlsx"
+    headers = ("location", "new_cases", "new_deaths", "total_cases", "total_deaths", "population")
+    make_workbook(source, ("date", *headers, "新增病例", "new_cases_per_million"),
+                  [(datetime(2020, 7, 1), "Alpha", 10, 0, 100, 0, 300, alias, 2)])
+    make_workbook(template, headers)
+    store = Store(tmp_path / "a23.db")
+    data = source.read_bytes()
+    store.save(parse_document(data, source.name), data)
+    fill_workbook(store, source.name, template, tmp_path)
+    workbook = load_workbook(tmp_path / COVID_OUTPUT)
+    assert workbook.active["C2"].value == expected
+    workbook.close()
+    report = json.loads((tmp_path / "fill_report_covid19.json").read_text())
+    item = report["cells"][2]
+    if expected is None:
+        assert {option["source"]["field"] for option in item["conflicts"]} == {"new_cases", "新增病例"}
+
+
+def test_bad_daily_mapping_returns_readable_error(client, demo):
+    template = demo[0] / "模板_无关.xlsx"
+    make_workbook(template, ("location", "额外", "new_deaths", "total_cases", "total_deaths", "population"))
+    response = client.post("/fill", json={"doc": DAILY_DOC, "template": template.name})
+    assert response.status_code == 400
+    assert "无法映射" in response.json()["detail"]
+
+
+def test_unknown_document_has_no_score(client):
+    assert client.get("/reports", params={"doc": "不存在.docx"}).status_code == 404
+
+
+def test_parse_and_fill_reject_different_version_and_hide_stale_evidence(tmp_path, monkeypatch):
+    inputs, outputs, original, _ = build_demo(tmp_path)
+    store = Store(outputs / "a23.db")
+    monkeypatch.setattr(main, "INPUTS", inputs)
+    monkeypatch.setattr(main, "DATA", outputs)
+    monkeypatch.setattr(main, "store", store)
+    client = TestClient(main.app)
+    document = Document(inputs / CITY_DOC)
+    document.paragraphs[0].text = document.paragraphs[0].text.replace("GDP总量100", "GDP总量200")
+    buffer = BytesIO()
+    document.save(buffer)
+    content = buffer.getvalue()
+    response = client.post("/parse", files={"file": (CITY_DOC, content)})
+    digest = response.headers["X-A23-Source-SHA256"]
+    assert digest == sha256(content).hexdigest()
+    response = client.post("/fill", json={"doc": CITY_DOC, "template": CITY_TEMPLATE, "source_sha256": digest})
+    assert response.status_code == 400 and "内容不同" in response.json()["detail"]
+    fact = {"block_no": 1, "entity": "甲城", "metric": "GDP总量", "value": "200",
+            "unit": "亿元", "snippet": "GDP总量200亿元"}
+    extract_document(content, CITY_DOC, [], store, lambda _: {"facts": [fact]})
+    query = {"doc": CITY_DOC, "file": CITY_OUTPUT, "row": 2, "column": 2}
+    old = client.get("/cells", params=query).json()
+    assert old["text"] is None and old["evidence_status"] == "stale"
+    latest = client.post("/fill", json={"doc": CITY_DOC, "template": CITY_TEMPLATE, "source_sha256": digest})
+    assert latest.status_code == 200
+    assert latest.headers["X-A23-Result-ID"] != original["result_id"]
+    assert client.get("/reports", params={"doc": CITY_DOC}).status_code == 404
+    assert client.get("/cells", params={**query, "result_id": original["result_id"]}).status_code == 409
+    new = client.get("/cells", params=query).json()
+    assert "GDP总量200亿元" in new["text"] and new["evaluation"] is None
+
+
+def test_wrong_refusal_and_missing_cell_are_distinct(tmp_path, monkeypatch):
+    inputs, outputs, _, _ = build_demo(tmp_path)
+    monkeypatch.setattr(main, "DATA", outputs)
+    monkeypatch.setattr(main, "store", Store(outputs / "a23.db"))
+    client = TestClient(main.app)
+    reference = inputs / "参考_合成城市.xlsx"
+    workbook = load_workbook(reference)
+    workbook.active["B2"] = 999
+    workbook.save(reference)
+    workbook.close()
+    evaluate(outputs / CITY_OUTPUT, reference, outputs / "eval_report.json", CITY_DOC, False)
+    city = {"doc": CITY_DOC, "file": CITY_OUTPUT, "row": 2, "column": 2}
+    wrong = client.get("/cells", params=city).json()
+    assert wrong["evaluation"] == "值不符"
+    daily = {"doc": DAILY_DOC, "file": COVID_OUTPUT, "row": 3, "column": 4}
+    refused = client.get("/cells", params=daily).json()
+    assert refused["decision"] == "refused" and refused["evidence_status"] == "available"
+    trace_path = outputs / "fill_report.json"
+    trace = json.loads(trace_path.read_text())
+    trace["cells"] = [cell for cell in trace["cells"] if (cell["row"], cell["column"]) != (2, 2)]
+    write_json(trace_path, trace)
+    assert client.get("/cells", params=city).json()["decision"] == "missing"
+
+
+def test_reference_excel_serial_is_compared_in_the_date_column(tmp_path):
+    inputs, outputs, _, _ = build_demo(tmp_path)
+    reference = inputs / "参考_合成逐日.xlsx"
+    workbook = load_workbook(reference)
+    value = workbook.active["A2"].value
+    workbook.active["A2"] = to_excel(value, workbook.epoch)
+    workbook.active["A2"].number_format = "General"
+    workbook.save(reference)
+    workbook.close()
+    report = evaluate(outputs / COVID_OUTPUT, reference, outputs / "eval_report_covid19.json", DAILY_DOC, True)
+    assert report["correct_rate"] == 1 and report["diff"] == []
+
+
+def test_formal_rules_refuse_partial_and_unbounded_fixed_counts():
+    city = {"block_count": 113, "rows": [1, 100], "city_order_matches": 100, "cells_written": 500,
+            "cells_empty": 0, "cell_accuracy": 1, "row_completeness": 1}
+    daily = {"block_count": 15088, "rows": 2542, "required": 17464, "expected_empty": 330,
+             "cells_written": 17464, "cells_empty": 330, "correct": 17464, "false_fills": 0,
+             "missed": 0, "correct_rate": 1, "false_fill_rate": 0, "missed_rate": 0}
+    with pytest.raises(ValueError, match="同时包含"):
+        checked_rules({"rebuilt": {"01": city}}, "rebuilt")
+    with pytest.raises(ValueError, match=r"01.rows 必须精确"):
+        checked_rules({"rebuilt": {"01": city, "03": daily}}, "rebuilt")
+    city["rows"] = 100
+    city["cell_accuracy"] = [0.0, 1.0]
+    with pytest.raises(ValueError, match="两个独立重抽"):
+        checked_rules({"rebuilt": {"01": city, "03": daily}}, "rebuilt")
+
+
+def test_valid_extraction_survives_a_malformed_fact(tmp_path):
+    store = Store(tmp_path / "a23.db")
+    valid = {"block_no": 1, "metric": "GDP", "value": 10, "snippet": "GDP10", "unit": None}
+    result = extract_document(b"GDP10", "输入.txt", [], store, lambda _: {"facts": [valid, {"block_no": 1}]})
+    assert result["kept"] == 1 and result["rejected"] == {"事实字段不符合约定": 1}
+
+
+def test_fact_export_preserves_two_documents_with_the_same_suffix(tmp_path):
+    store = Store(tmp_path / "a23.db")
+    for name in ("空结果.txt", "另一份.txt"):
+        content = name.encode()
+        store.save(parse_document(content, name), content)
+    first, = export_facts(store, [tmp_path / "空结果.txt"], tmp_path)
+    second, = export_facts(store, [tmp_path / "另一份.txt"], tmp_path)
+    assert first["file"] != second["file"]
+    saved = json.loads((tmp_path / "facts_export_manifest.json").read_text())
+    assert saved == [first, second]

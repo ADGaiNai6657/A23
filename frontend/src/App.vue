@@ -151,16 +151,19 @@ async function fill(demo = false) {
     return
   }
   await run('fill', demo ? '正在解析文档' : '正在填写表格', async () => {
+    let sourceSha256
     if (demo) {
       const parsed = await api.parse(file.value)
+      if (!parsed.source_sha256) throw new Error('后端未返回原文版本，请重启服务后重试。')
       preview.value = parsed.blocks.slice(0, 5)
       source.value = parsed.file
+      sourceSha256 = parsed.source_sha256
       feedback.value.input = { text: `解析完成，共 ${parsed.blocks.length} 个块。` }
       pending.value.label = '正在填写表格'
     }
     const doc = source.value.trim()
     const started = performance.now()
-    const summary = await api.fill(doc, template.value.trim())
+    const summary = await api.fill(doc, template.value.trim(), sourceSha256)
     result.value = {
       doc,
       ...summary,
@@ -172,7 +175,7 @@ async function fill(demo = false) {
     column.value = 1
     pending.value.label = '正在读取自检报告'
     try {
-      report.value = await api.reports(doc, layout.value.output)
+      report.value = await api.reports(doc, layout.value.output, summary.result_id)
     } catch (failure) {
       if (failure.status !== 404) throw failure
     }
@@ -187,7 +190,9 @@ async function fill(demo = false) {
 function inspectCell() {
   detail.value = null
   return run('detail', '正在查询单元格', async () => {
-    detail.value = await api.cell(result.value.doc, layout.value.output, row.value, column.value)
+    detail.value = await api.cell(
+      result.value.doc, layout.value.output, row.value, column.value, result.value.result_id,
+    )
   })
 }
 
@@ -355,7 +360,7 @@ function percent(value) {
           <div><dt>填写耗时</dt><dd>{{ result.elapsed }} <span>秒</span></dd></div>
         </dl>
         <div v-if="report" class="report">
-          <p>最近一次自检</p>
+          <p>{{ report.basis === 'independent-source-check' ? '独立原文核对' : '参考表评分' }}</p>
           <dl class="rates">
             <div v-for="[label, key] in layout.rates" :key="key">
               <dt>{{ label }}</dt>
@@ -391,7 +396,8 @@ function percent(value) {
                 <span v-if="detail.value != null" class="detail-value">填写值 {{ detail.value }}</span>
               </div>
               <p>{{ detail.reason }}</p>
-              <p v-if="detail.evaluation">最近自检判定 {{ detail.evaluation }}</p>
+              <p v-if="detail.evaluation">本次自检判定 {{ detail.evaluation }}</p>
+              <p v-if="detail.evidence_status === 'stale'">原文已变更，请重新填写后核查来源。</p>
               <p v-if="detail.source">{{ detail.source.doc }} · 第 {{ detail.source.block_no }} 块</p>
               <blockquote v-if="detail.text">{{ detail.text }}</blockquote>
             </div>

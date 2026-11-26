@@ -1,0 +1,26 @@
+[
+  {
+    "doc": "2024年药品流通行业运行统计分析报告.txt",
+    "file": "facts_export_txt.json",
+    "total": 199,
+    "exported": 199
+  },
+  {
+    "doc": "2023年文化和旅游发展统计公报.md",
+    "file": "facts_export_md.json",
+    "total": 217,
+    "exported": 217
+  },
+  {
+    "doc": "南京市2021~2024年国民经济和社会发展统计公报汇总.docx",
+    "file": "facts_export_docx.json",
+    "total": 1773,
+    "exported": 1773
+  },
+  {
+    "doc": "COVID-19全球数据集（节选）.xlsx",
+    "file": "facts_export_xlsx.json",
+    "total": 2790,
+    "exported": 200
+  }
+]

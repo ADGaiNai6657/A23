@@ -1,0 +1,137 @@
+{
+  "docx-list": {
+    "doc": "南京市2021~2024年国民经济和社会发展统计公报汇总.docx",
+    "mode": "list",
+    "count": 12,
+    "kept": 12,
+    "rejected": {},
+    "kind": "docx",
+    "block_count": 1217,
+    "metrics": [
+      "地区生产总值",
+      "常住人口",
+      "一般公共预算收入"
+    ],
+    "seconds": 23.01,
+    "model": "deepseek-flash",
+    "temperature": 0,
+    "batch_size": 30
+  },
+  "xlsx-list": {
+    "doc": "COVID-19全球数据集（节选）.xlsx",
+    "mode": "list",
+    "count": 400,
+    "kept": 400,
+    "rejected": {},
+    "kind": "xlsx",
+    "block_count": 15088,
+    "metrics": [
+      "人均GDP",
+      "人口"
+    ],
+    "seconds": 24.61,
+    "model": "deepseek-flash",
+    "temperature": 0,
+    "batch_size": 30
+  },
+  "txt-list": {
+    "doc": "2024年药品流通行业运行统计分析报告.txt",
+    "mode": "list",
+    "count": 18,
+    "kept": 18,
+    "rejected": {},
+    "kind": "txt",
+    "block_count": 70,
+    "metrics": [
+      "销售总额",
+      "销售额",
+      "主营业务收入"
+    ],
+    "seconds": 32.31,
+    "model": "deepseek-flash",
+    "temperature": 0,
+    "batch_size": 30
+  },
+  "txt-general": {
+    "doc": "2024年药品流通行业运行统计分析报告.txt",
+    "mode": "general",
+    "count": 184,
+    "kept": 181,
+    "rejected": {
+      "原话与原文块不符": 1,
+      "原话缺少数值": 2
+    },
+    "kind": "txt",
+    "block_count": 70,
+    "metrics": [],
+    "seconds": 72.46,
+    "model": "deepseek-flash",
+    "temperature": 0,
+    "batch_size": 30
+  },
+  "md-list": {
+    "doc": "2023年文化和旅游发展统计公报.md",
+    "mode": "list",
+    "count": 3,
+    "kept": 3,
+    "rejected": {},
+    "kind": "md",
+    "block_count": 68,
+    "metrics": [
+      "国内出游人次",
+      "旅游收入",
+      "国内游客出游总花费"
+    ],
+    "seconds": 9.86,
+    "model": "deepseek-flash",
+    "temperature": 0,
+    "batch_size": 30
+  },
+  "md-general": {
+    "doc": "2023年文化和旅游发展统计公报.md",
+    "mode": "general",
+    "count": 214,
+    "kept": 214,
+    "rejected": {},
+    "kind": "md",
+    "block_count": 68,
+    "metrics": [],
+    "seconds": 117.35,
+    "model": "deepseek-flash",
+    "temperature": 0,
+    "batch_size": 30
+  },
+  "xlsx-general": {
+    "doc": "COVID-19全球数据集（节选）.xlsx",
+    "mode": "general",
+    "count": 2430,
+    "kept": 2390,
+    "rejected": {
+      "原话与原文块不符": 40
+    },
+    "kind": "xlsx",
+    "block_count": 15088,
+    "metrics": [],
+    "seconds": 276.79,
+    "model": "deepseek-flash",
+    "temperature": 0,
+    "batch_size": 30
+  },
+  "docx-general": {
+    "doc": "南京市2021~2024年国民经济和社会发展统计公报汇总.docx",
+    "mode": "general",
+    "count": 2151,
+    "kept": 1761,
+    "rejected": {
+      "事实字段不符合约定": 246,
+      "原话与原文块不符": 144
+    },
+    "kind": "docx",
+    "block_count": 1217,
+    "metrics": [],
+    "seconds": 405.11,
+    "model": "deepseek-flash",
+    "temperature": 0,
+    "batch_size": 30
+  }
+}

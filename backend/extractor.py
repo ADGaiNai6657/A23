@@ -1,6 +1,7 @@
 import json
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import httpx
@@ -18,6 +19,10 @@ XLSX_MODEL_ROWS = 200
 YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?=年|\b)")
 ISO_DAY = re.compile(r"(?<!\d)(?:19|20)\d{2}-\d{2}-\d{2}(?!\d)")
 HEADING = re.compile(r"^[#\s]*(?:19|20)\d{2}\s*(?:年(?:度)?\s*[^。；;：:，,]*)?$")
+
+
+class ModelFormatError(ValueError):
+    pass
 
 
 def compact(text: str) -> str:
@@ -86,7 +91,7 @@ def model_response(prompt: str) -> dict:
     except httpx.RequestError as error:
         raise ValueError("DeepSeek 请求超时或网络不可用") from error
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
-        raise ValueError("DeepSeek 返回的数据无法解析") from error
+        raise ModelFormatError("DeepSeek 返回的数据无法解析") from error
 
 
 def prompt_for(batch: dict[int, Block], metrics: list[str]) -> str:
@@ -103,7 +108,7 @@ def prompt_for(batch: dict[int, Block], metrics: list[str]) -> str:
 
 def extract_document(
     data: bytes, name: str, metrics: list[str], store: Store,
-    respond: Callable[[str], dict] = model_response,
+    respond: Callable[[str], dict] = model_response, *, workers: int = 1,
 ) -> dict:
     parsed = parse_document(data, name)
     mode = "list" if metrics else "general"
@@ -115,18 +120,36 @@ def extract_document(
     rejected = {}
     count = 0
 
-    for offset in range(0, len(source_blocks), BATCH_SIZE):
-        batch = dict(source_blocks[offset:offset + BATCH_SIZE])
+    batches = [
+        dict(source_blocks[offset:offset + BATCH_SIZE])
+        for offset in range(0, len(source_blocks), BATCH_SIZE)
+    ]
+
+    def request(batch: dict[int, Block]) -> RawFacts:
         prompt = prompt_for(batch, metrics)
         try:
-            response = RawFacts.model_validate(respond(prompt))
-        except ValidationError:
+            return RawFacts.model_validate(respond(prompt))
+        except (ValidationError, ModelFormatError):
             try:
-                response = RawFacts.model_validate(respond(prompt + "\n请严格使用指定 JSON 结构。"))
-            except ValidationError as error:
+                return RawFacts.model_validate(respond(prompt + "\n请严格使用指定 JSON 结构。"))
+            except (ValidationError, ModelFormatError) as error:
                 raise ValueError("模型返回的事实字段不符合约定") from error
+
+    pool = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    try:
+        responses = list(pool.map(request, batches) if pool else map(request, batches))
+    finally:
+        if pool:
+            pool.shutdown(cancel_futures=True)
+    for batch, response in zip(batches, responses, strict=True):
         count += len(response.facts)
-        for fact in response.facts:
+        for raw in response.facts:
+            try:
+                fact = RawFact.model_validate(raw)
+            except ValidationError:
+                reason = "事实字段不符合约定"
+                rejected[reason] = rejected.get(reason, 0) + 1
+                continue
             reason = evidence_error(fact, batch)
             key = metric_key(fact.metric)
             if allowed and key not in allowed:

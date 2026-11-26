@@ -14,8 +14,8 @@ from openpyxl import load_workbook
 from config import BACKEND, ROOT
 from evaluate import matches
 from extractor import MODEL, extract_document
-from fill_spec import CITY_OUTPUT, COVID_OUTPUT
-from filler import fill_workbook, write_json
+from fill_spec import CITY_OUTPUT, COVID_OUTPUT, REPORT_FILES
+from filler import block_digest, fill_workbook, write_json
 from parsers import parse_document
 from store import Store
 
@@ -41,16 +41,17 @@ CORPUS_ANCHORS = {
 }
 
 
-def city_expected(path: Path) -> list[tuple]:
+def city_expected(path: Path) -> tuple[list[tuple], list[dict]]:
     paragraphs = [
-        paragraph.text for paragraph in Document(path).paragraphs
+        (number, paragraph.text) for number, paragraph in enumerate(Document(path).paragraphs, 1)
         if "一般公共预算收入" in paragraph.text
     ]
     expected = []
-    for index, text in enumerate(paragraphs):
+    locators = []
+    for number, text in paragraphs:
         name = re.split(r" GDP 总量|以|紧随|凭借|在转型|作为", text, maxsplit=1)[0]
         if not re.fullmatch(r"[\u4e00-\u9fff]{2,12}", name):
-            raise ValueError(f"01 原文核对无法确定城市名，正文行 {index + 1}")
+            raise ValueError(f"01 原文核对无法确定城市名，原文段落 {number}")
         # This audit reads the source quantities directly instead of using model facts.
         revenue = text.split("一般公共预算收入", 1)[1]
         numbers = []
@@ -60,17 +61,19 @@ def city_expected(path: Path) -> list[tuple]:
                 raise ValueError(f"01 原文核对缺少指标数量，城市 {name}")
             numbers.append(float(found[1].replace(",", "")))
         expected.append((name, *numbers))
-    return expected
+        locators.append({"paragraph": number})
+    return expected, locators
 
 
-def daily_expected(path: Path) -> list[tuple]:
+def daily_expected(path: Path) -> tuple[list[tuple], list[dict]]:
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
         rows = workbook.active.values
         headers = next(rows)
         indices = [headers.index(field) for field in ("日期", *DAILY_FIELDS)]
         selected = {}
-        for row in rows:
+        locators = {}
+        for number, row in enumerate(rows, 2):
             if not isinstance(row[indices[0]], datetime):
                 continue
             day = row[indices[0]].date()
@@ -79,7 +82,9 @@ def daily_expected(path: Path) -> list[tuple]:
                 if key in selected:
                     raise ValueError(f"03 原文核对发现重复日期和国家键 {key}")
                 selected[key] = (day, *(row[index] for index in indices[1:]))
-        return [selected[key] for key in sorted(selected)]
+                locators[key] = {"sheet": workbook.active.title, "row": number}
+        ordered = sorted(selected)
+        return [selected[key] for key in ordered], [locators[key] for key in ordered]
     finally:
         workbook.close()
 
@@ -90,31 +95,38 @@ def verify_workbook(path: Path, expected: list[tuple], width: int) -> dict:
         sheet = workbook.active
         rows = list(sheet.iter_rows(min_row=2, max_col=width, values_only=True))
         diffs = []
+        complete = city_order_matches = 0
         nonempty = correct = false_fills = missed = 0
         for row, (actual, target) in enumerate(
             zip_longest(rows, expected, fillvalue=(None,) * width), 2,
         ):
+            complete += all(value is not None for value in actual)
+            city_order_matches += matches(actual[0], target[0])
             for column, (value, truth) in enumerate(zip(actual, target), 1):
                 nonempty += truth is not None
                 correct += truth is not None and matches(value, truth)
                 false_fills += truth is None and value is not None
                 missed += truth is not None and value is None
                 if not matches(value, truth):
-                    diffs.append({"row": row, "column": column, "actual": value, "source_value": truth})
+                    decision = "误填" if truth is None else "漏填" if value is None else "值不符"
+                    diffs.append({
+                        "row": row, "column": column, "actual": value, "source_value": truth, "decision": decision,
+                    })
         return {
             "rows": len(rows), "columns": sheet.max_column, "source_nonempty": nonempty,
             "source_empty": len(expected) * width - nonempty, "correct_nonempty": correct,
             "false_fills": false_fills, "missed": missed, "differences": diffs,
+            "complete_rows": complete, "city_order_matches": city_order_matches,
         }
     finally:
         workbook.close()
 
 
-def verify_trace(store: Store, path: Path, rows: int, columns: int) -> None:
+def verify_trace(store: Store, path: Path, locators: list[dict], columns: int) -> dict:
     report = json.loads(path.read_text(encoding="utf-8"))
     by_number = {block["number"]: block for block in store.blocks(report["doc"])}
     coordinates = {(item["row"], item["column"]) for item in report["cells"]}
-    expected = {(row, column) for row in range(2, rows + 2) for column in range(1, columns + 1)}
+    expected = {(row, column) for row in range(2, len(locators) + 2) for column in range(1, columns + 1)}
     if coordinates != expected or len(report["cells"]) != len(expected):
         raise ValueError(f"逐格记录数量或坐标不符：{path.name}")
     for item in report["cells"]:
@@ -122,8 +134,45 @@ def verify_trace(store: Store, path: Path, rows: int, columns: int) -> None:
         if source is None or not item["reason"]:
             raise ValueError(f"逐格记录缺少原文位置或原因：{path.name} {item['row']},{item['column']}")
         block = by_number.get(source["block_no"])
-        if not block or source["doc"] != report["doc"] or source["locator"] != block["locator"]:
+        if (
+            not block or source["doc"] != report["doc"]
+            or source["locator"] != block["locator"]
+            or source["locator"] != locators[item["row"] - 2]
+            or source.get("block_sha256") != block_digest(block)
+        ):
             raise ValueError(f"逐格记录源定位无法回查：{path.name} {item['row']},{item['column']}")
+        if columns == 7 and item["column"] >= 3 and item["decision"] == "filled":
+            if source.get("field") != DAILY_FIELDS[item["column"] - 2]:
+                raise ValueError(f"03 逐格记录的源字段不符：{item['row']},{item['column']}")
+    return report
+
+
+def source_score(trace: dict, audit: dict, daily: bool, database_sha256: str) -> dict:
+    score = {
+        key: trace[key] for key in (
+            "doc", "file", "result_id", "source_sha256", "template_sha256",
+            "run_id", "workbook_sha256", "rows", "cells_written", "cells_empty", "block_count",
+        )
+    }
+    score.update({
+        "basis": "independent-source-check", "diff": audit["differences"],
+        "database_sha256": database_sha256,
+    })
+    if daily:
+        required, empty = audit["source_nonempty"], audit["source_empty"]
+        score.update({
+            "required": required, "expected_empty": empty, "correct": audit["correct_nonempty"],
+            "false_fills": audit["false_fills"], "missed": audit["missed"],
+            "correct_rate": audit["correct_nonempty"] / required,
+            "false_fill_rate": audit["false_fills"] / empty, "missed_rate": audit["missed"] / required,
+        })
+    else:
+        score.update({
+            "cell_accuracy": audit["correct_nonempty"] / audit["source_nonempty"],
+            "row_completeness": audit["complete_rows"] / score["rows"],
+            "city_order_matches": audit["city_order_matches"],
+        })
+    return score
 
 
 def parse_corpus(root: Path, store: Store) -> list[dict]:
@@ -174,18 +223,20 @@ def check_dataset(root: Path, output: Path, extract: bool) -> dict:
     originals = {
         path: hashlib.sha256(path.read_bytes()).hexdigest() for path in (city_template, daily_template)
     }
-    expected_city = city_expected(city_source)
-    expected_daily = daily_expected(daily_source)
+    expected_city, city_locators = city_expected(city_source)
+    expected_daily, daily_locators = daily_expected(daily_source)
     if len(expected_city) != 100 or len(expected_daily) != 2542:
         raise ValueError("独立原文核对得出的预期行数不符合任务书")
     if sum(value is None for row in expected_daily for value in row) != 330:
         raise ValueError("逐日原文的空格数与任务书的 330 不一致")
 
     results = {}
-    for name, source, template, workbook, trace, expected, width in (
-        ("01", CITY_SOURCE, city_template, CITY_OUTPUT, "fill_report.json", expected_city, 5),
-        ("03", DAILY_SOURCE, daily_template, COVID_OUTPUT, "fill_report_covid19.json", expected_daily, 7),
+    database_sha256 = hashlib.sha256(store.path.read_bytes()).hexdigest()
+    for name, source, template, workbook, expected, locators, width in (
+        ("01", CITY_SOURCE, city_template, CITY_OUTPUT, expected_city, city_locators, 5),
+        ("03", DAILY_SOURCE, daily_template, COVID_OUTPUT, expected_daily, daily_locators, 7),
     ):
+        trace_file, _, score_file = REPORT_FILES[workbook]
         previous = None
         timings = []
         for _ in range(2):
@@ -193,12 +244,13 @@ def check_dataset(root: Path, output: Path, extract: bool) -> dict:
             outcome = fill_workbook(store, source, template, output)
             timings.append(round(perf_counter() - started, 3))
             audit = verify_workbook(output / workbook, expected, width)
-            verify_trace(store, output / trace, len(expected), width)
+            trace = verify_trace(store, output / trace_file, locators, width)
             current = {**outcome, **audit}
             if previous is not None and previous != current:
                 raise ValueError(f"{name} 同库两次填写结果不一致")
             previous = current
         results[name] = {**current, "fill_seconds": timings, "block_count": len(store.blocks(source))}
+        write_json(output / score_file, source_score(trace, audit, name == "03", database_sha256))
         if hashlib.sha256(template.read_bytes()).hexdigest() != originals[template]:
             raise ValueError(f"模板原件出现变更：{template.name}")
 
