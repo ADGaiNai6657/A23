@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from openpyxl import load_workbook
 
+from city_evidence import city_claim
 from criteria import checked_rules, load_expectations
 from extractor import CITY_TITLE, evidence_error, period_for, periods
 from fill_spec import (
@@ -122,7 +123,7 @@ def city_value(fact: dict, column: CityColumn):
 
 def city_fact_evidence(fact: dict) -> dict:
     return {key: fact[key] for key in ("doc", "block_no", "metric", "value", "unit", "snippet",
-                                      "period", "period_block_no", "mode", "scope")}
+                                      "period", "period_block_no", "mode", "scope", "source_scope")}
 
 
 def annual_scope(scope: str, period: str) -> str:
@@ -147,9 +148,11 @@ def city_rows(blocks: list[dict], facts: list[dict], target_period: str | None =
         if evidence_error(raw, parsed_by_number):
             continue
         period, anchor = period_for(raw, parsed_by_number[index], context[index])
+        claim_error, source_scope = city_claim(raw, parsed_by_number[index].text)
         by_block[index].append({**fact, "period": period or fact["period"],
                                 "period_block_no": anchor if period else fact["period_block_no"],
-                                "metric_key": metric_key(fact["metric"])})
+                                "metric_key": metric_key(fact["metric"]), "claim_error": claim_error,
+                                "source_scope": source_scope})
     target_keys = {column.key for column in CITY_COLUMNS}
     rows = []
     for block in blocks:
@@ -182,10 +185,11 @@ def city_rows(blocks: list[dict], facts: list[dict], target_period: str | None =
         selected_period = target_period or (next(iter(known_periods)) if len(known_periods) == 1 else "")
         for column in CITY_COLUMNS:
             matching = [fact for fact in city_facts if fact["metric_key"] == column.key]
+            identified = [fact for fact in matching if not fact["claim_error"]]
             comparable = [
-                fact for fact in matching
+                fact for fact in identified
                 if not period_ambiguous and (fact["period"] == selected_period or (not target_period and not fact["period"]))
-                and not annual_scope(fact["scope"], selected_period)
+                and not fact["source_scope"] and not annual_scope(fact["scope"], selected_period)
             ]
             candidates = [
                 {"value": value, "fact": fact}
@@ -205,7 +209,9 @@ def city_rows(blocks: list[dict], facts: list[dict], target_period: str | None =
                 values.append(cell(None, "抽到同城同指标事实，但数值或单位与模板列不符", source,
                                    "incompatible_value"))
             elif matching:
-                values.append({**cell(None, "缺少可确认的目标期次或全年口径事实", source, "period_or_scope"),
+                reason = "缺少可确认的目标期次或全年口径事实" if identified else matching[0]["claim_error"]
+                code = "period_or_scope" if identified else "metric_mismatch"
+                values.append({**cell(None, reason, source, code),
                                "conflicts": [{"value": fact["value"], "fact": city_fact_evidence(fact),
                                               "source": source} for fact in matching]})
             else:

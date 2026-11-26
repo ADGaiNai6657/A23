@@ -89,11 +89,15 @@ def compare_runs(first: dict, second: dict) -> dict:
 def replay_run(path: Path, content: bytes, original: dict, store: Store) -> dict:
     if (path.name, sha256(content).hexdigest()) != (original["doc"], original["input_sha256"]):
         raise ValueError("重放用的文件名或原文字节与记录不符")
+    if not original.get("batches") or any(not batch.get("attempts") for batch in original["batches"]):
+        raise ValueError("重放记录缺少批次或请求")
     attempts = iter(attempt for batch in original["batches"] for attempt in batch["attempts"])
 
     def respond(prompt: str) -> dict:
         attempt = next(attempts, None)
-        if attempt is None or sha256(prompt.encode()).hexdigest() != attempt["prompt_sha256"]:
+        if attempt is None:
+            raise ValueError("重放记录缺少批次响应")
+        if sha256(prompt.encode()).hexdigest() != attempt["prompt_sha256"]:
             raise ValueError("重放的 Prompt 与原请求不符")
         payload = attempt["response"]
         try:
@@ -105,6 +109,15 @@ def replay_run(path: Path, content: bytes, original: dict, store: Store) -> dict
     extract_document(content, path.name, original["metrics"], store, respond, audit=audit)
     if next(attempts, None) is not None:
         raise ValueError("记录中还有未重放的响应")
+    for key in ("batch_size", "block_count", "sent_blocks", "mode"):
+        if original.get(key) != audit[key]:
+            raise ValueError(f"重放记录的 {key} 与本次解析不一致")
+
+    def batch_signatures(run: dict) -> list[tuple[list[int], list[str]]]:
+        return [(batch["blocks"], [a["prompt_sha256"] for a in batch["attempts"]]) for batch in run["batches"]]
+
+    if batch_signatures(original) != batch_signatures(audit):
+        raise ValueError("重放记录的批次覆盖、顺序或请求边界不一致")
     audit.update({"provider": "recorded-response", "original_run_id": original["run_id"]})
     return audit
 

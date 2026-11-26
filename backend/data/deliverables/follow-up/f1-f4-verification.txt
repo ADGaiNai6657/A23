@@ -1,0 +1,64 @@
+当前代码的公开原文综合验收
+........................................................................ [ 80%]
+.................                                                        [100%]
+89 passed in 24.99s
+合成交付文件通过：/Users/adgainai6657/PycharmProjects/A23/backend/data/deliverables/demo
+合成 same-db 通过（同库重新填写并逐项比较）
+合成 rebuilt 通过（空库执行固定模型替身并重新入库）
+改数 | exit=1 | 01.cell_accuracy 预期 1，实际 0.5，检查 eval_report.json
+改数 pytest | exit=1 | F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_delivered_report_predicate[01-cell_accuracy] _______________
+
+case = '01', key = 'cell_accuracy'
+
+    @pytest.mark.parametrize("case,key", [
+        (case, key) for case, rules in load_expectations()["demo"].items() for key in rules
+    ])
+    def test_delivered_report_predicate(case, key):
+        directory = Path(os.getenv("A23_TEST_REPORT_DIR", str(DEMO_DELIVERY)))
+        rules = load_expectations()["demo"]
+        reports = checked_outputs(directory, "reference", require_database=False)
+>       assert not (failures := check(reports, {case: {key: rules[case][key]}})), "\n".join(failures)
+E       AssertionError: 01.cell_accuracy 预期 1，实际 0.5，检查 eval_report.json
+E       assert not ['01.cell_accuracy 预期 1，实际 0.5，检查 eval_report.json']
+
+backend/test_a23.py:395: AssertionError
+=========================== short test summary info ============================
+FAILED backend/test_a23.py::test_delivered_report_predicate[01-cell_accuracy]
+1 failed, 58 deselected in 0.20s
+改键 | exit=1 | 01.rows 预期 1，实际 None，检查 eval_report.json
+删报告 | exit=1 | 验收失败：01 缺少 eval_report.json，预期文件存在，实际缺失（/var/folders/8t/1t796b4j16n_qm7n5h3jpyx80000gn/T/a23-verify-qwr_nb69/damage/eval_report.json）
+恢复 | exit=0 | 验收通过，共 13 条数值判据
+恢复 pytest | exit=0 | .                                                                        [100%]
+1 passed, 58 deselected in 0.15s
+公开样本交付文件通过：source/same-db.zip（核对报告与工作簿）
+公开样本交付文件通过：source/rebuilt-history.zip（核对报告与工作簿）
+公开样本交付文件通过：follow-up/same-db.zip（核对报告与工作簿）
+公开样本交付文件通过：follow-up/city-online.zip（报告、工作簿、凭证和逐批离线重放；包内无数据库）
+source same-db 通过（19 条判据）：/tmp/a23-f1.s05MMW/v2-original
+source rebuilt/online 通过（19 条判据）：/tmp/a23-audit-fix.MBSRG2/city-online
+综合验收通过，耗时 27.16 秒
+
+受控参考表回归
+reference same-db 通过（19 条判据）：/private/tmp/a23-f1.s05MMW/reference-control/test_independent_reference_pro0/same
+reference rebuilt/history 通过（19 条判据）：/private/tmp/a23-f1.s05MMW/reference-control/test_independent_reference_pro0/rebuilt
+.
+1 passed, 14 deselected in 14.33s
+
+独立参考判据的综合入口
+89 passed in 25.44s
+reference same-db 通过（19 条判据）：/tmp/a23-f1.s05MMW/reference-control/test_independent_reference_pro0/same
+reference rebuilt/history 通过（19 条判据）：/tmp/a23-f1.s05MMW/reference-control/test_independent_reference_pro0/rebuilt
+综合验收通过，耗时 27.85 秒
+
+TXT 既有响应离线重放
+[{"run_id": "068af442bd2f4fecb75a8a243ea12a5e", "doc": "2024年药品流通行业运行统计分析报告.txt", "mode": "list", "count": 24, "kept": 24, "rejected": {}, "traceable": 24, "attempts": 3, "model_calls": 0, "seconds": 0.004}, {"run_id": "338094f4755945da9f991d49b73505ed", "doc": "2024年药品流通行业运行统计分析报告.txt", "mode": "list", "count": 28, "kept": 28, "rejected": {}, "traceable": 28, "attempts": 3, "model_calls": 0, "seconds": 0.002}]
+两轮共同事实 6 条，差异见 /tmp/a23-f1.s05MMW/txt-replay/comparison.json
+
+提交 0be27a0 的本地独立克隆
+Cloning into '/tmp/a23-f1.s05MMW/cloned'...
+0be27a0
+74 passed in 10.29s
+综合验收通过，耗时 12.14 秒
+clone_to_verify_seconds=31

@@ -10,13 +10,14 @@ from tempfile import TemporaryDirectory
 from time import perf_counter
 from zipfile import BadZipFile, ZipFile
 
-from acceptance import DELIVERABLES, DEMO_DELIVERY, check, checked_outputs
+from acceptance import DELIVERABLES, DEMO_DELIVERY, check, checked_outputs, sample_rules, validate_profile
 from config import BACKEND, DIST, ROOT
 from criteria import EXPECTATIONS, checked_rules, load_expectations
 from demo import build_demo, fill_demo
 from fill_spec import CITY_OUTPUT, REPORT_FILES
 from filler import write_json
 from rebuild_evidence import check_distinct_runs, check_execution
+from unpack_dataset import unpack_dataset
 
 
 def verify_reports(directory: Path, basis: str, rules: dict, *, require_database: bool = True) -> dict:
@@ -93,8 +94,31 @@ def verify_published_archives(root: Path, config: dict) -> None:
         with ZipFile(DELIVERABLES / archive) as bundle:
             directory = root / archive
             bundle.extractall(directory)
-        verify_reports(directory, "source", checked_rules(config, mode), require_database=False)
-        print(f"公开样本交付文件通过：{archive}（核对报告与工作簿）")
+        reports = verify_reports(directory, "source", checked_rules(config, mode), require_database=False)
+        if archive == "follow-up/city-online.zip":
+            inputs = root / "archive-inputs"
+            unpack_dataset(ROOT / "dataset" / "测试集.zip", inputs)
+            candidates = list(inputs.rglob(reports["01"]["doc"]))
+            if len(candidates) != 1:
+                raise ValueError(f"{archive} 缺少唯一可重放的公开原文")
+            check_execution(directory, "rebuilt", reports, archived_input=candidates[0])
+            print(f"公开样本交付文件通过：{archive}（报告、工作簿、凭证和逐批离线重放；包内无数据库）")
+        else:
+            print(f"公开样本交付文件通过：{archive}（核对报告与工作簿）")
+
+
+def verify_samples(same: Path, rebuilt: Path, basis: str, rebuilt_kind: str, config_path: Path) -> None:
+    config = load_expectations(config_path)
+    checked, counts = {}, {}
+    for mode, directory in (("same-db", same), ("rebuilt", rebuilt)):
+        rules = sample_rules(config, mode, basis, config_path.resolve().parent)
+        checked[mode] = verify_reports(directory, basis, rules)
+        validate_profile(config, basis, checked[mode])
+        check_execution(directory, mode, checked[mode], rebuilt_kind=rebuilt_kind)
+        counts[mode] = sum(map(len, rules.values()))
+    check_distinct_runs(checked["same-db"], checked["rebuilt"])
+    print(f"{basis} same-db 通过（{counts['same-db']} 条判据）：{same}")
+    print(f"{basis} rebuilt/{rebuilt_kind} 通过（{counts['rebuilt']} 条判据）：{rebuilt}")
 
 
 def main() -> None:
@@ -104,12 +128,17 @@ def main() -> None:
     parser.add_argument("--rebuilt-data-dir", type=Path, help="独立重建并评分的目录")
     parser.add_argument("--rebuilt-kind", choices=("online", "history"), default="online")
     parser.add_argument("--basis", choices=("source", "reference"), default="source")
+    parser.add_argument("--expectations", type=Path, help="独立样本判据 JSON；参考表模式必须显式指定")
     args = parser.parse_args()
     extra_runs = {"same-db": args.same_db_dir, "rebuilt": args.rebuilt_data_dir}
     if any(extra_runs.values()) and not all(extra_runs.values()):
         parser.error("样本验收同时需要 --same-db-dir 和 --rebuilt-data-dir")
     if args.same_db_dir and args.same_db_dir.resolve() == args.rebuilt_data_dir.resolve():
         parser.error("同库和重建库必须使用不同目录")
+    if args.basis == "reference" and not args.expectations:
+        parser.error("参考表模式须通过 --expectations 指定独立判据 JSON")
+    if args.expectations and not args.same_db_dir:
+        parser.error("--expectations 需要同库和重建库目录")
     if not (DIST / "index.html").is_file():
         parser.error("缺少 frontend/dist/index.html，请先在 frontend 执行 npm run build")
     started = perf_counter()
@@ -124,17 +153,9 @@ def main() -> None:
             config = load_expectations(EXPECTATIONS)
             verify_demo(args.demo_reports, root, config["demo"])
             verify_published_archives(root, config)
-            checked = {}
-            for mode, directory in extra_runs.items():
-                if directory is not None:
-                    rules = checked_rules(config, mode)
-                    checked[mode] = verify_reports(directory, args.basis, rules)
-                    check_execution(directory, mode, checked[mode], rebuilt_kind=args.rebuilt_kind)
-            if checked:
-                check_distinct_runs(checked["same-db"], checked["rebuilt"])
-                for mode, directory in extra_runs.items():
-                    label = f"{mode}/{args.rebuilt_kind}" if mode == "rebuilt" else mode
-                    print(f"{args.basis} {label} 通过（{sum(map(len, checked_rules(config, mode).values()))} 条判据）：{directory}")
+            if args.same_db_dir:
+                verify_samples(args.same_db_dir, args.rebuilt_data_dir, args.basis,
+                               args.rebuilt_kind, args.expectations or EXPECTATIONS)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error,
             BadZipFile, subprocess.CalledProcessError) as error:
         parser.exit(1, f"综合验收失败：{error}\n")

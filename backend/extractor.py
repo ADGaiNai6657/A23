@@ -1,6 +1,6 @@
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
@@ -48,18 +48,15 @@ def compact(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
-def evidence_error(fact: RawFact, blocks: dict[int, Block]) -> str | None:
-    block = blocks.get(fact.block_no)
-    if not block:
-        return "块号不在本批"
+def quoted_quantities(fact: RawFact, text: str) -> Iterator[re.Match[str]]:
+    """Yield numeric tokens in the compact source that are covered by an exact quote."""
     snippet = compact(fact.snippet)
-    text = compact(block.text)
-    if not snippet or snippet not in text:
-        return "原话与原文块不符"
+    if not snippet:
+        return
     value = compact(fact.value)
     quantity = NUMBER_TOKEN.match(value)
     if not quantity:
-        return "原话缺少数值"
+        return
     target = quantity.group().replace(",", "").replace("，", "").replace("−", "-")
     suffix = value[quantity.end():]
     # Match in the full block so a quote cannot cut a longer number in half.
@@ -70,8 +67,17 @@ def evidence_error(fact: RawFact, blocks: dict[int, Block]) -> str | None:
             left = max(0, end - len(snippet))
             start = text.find(snippet, left, found.start() + len(snippet))
             if 0 <= start <= found.start() and end <= start + len(snippet):
-                return None
-    return "原话缺少数值"
+                yield found
+
+
+def evidence_error(fact: RawFact, blocks: dict[int, Block]) -> str | None:
+    block = blocks.get(fact.block_no)
+    if not block:
+        return "块号不在本批"
+    text, snippet = compact(block.text), compact(fact.snippet)
+    if not snippet or snippet not in text:
+        return "原话与原文块不符"
+    return None if next(quoted_quantities(fact, text), None) else "原话缺少数值"
 
 
 def periods(blocks: list[tuple[int, Block]]) -> dict[int, tuple[str, int | None]]:

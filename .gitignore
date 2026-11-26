@@ -6,6 +6,8 @@ dist/
 backend/data/*.db*
 backend/data/demo/
 backend/data/actual/
+review-agent.md
+coding-agent.md
 /backend/check.py
 dataset/测试集/
 .pytest_cache/

@@ -63,7 +63,7 @@ def observed_scores(config: dict) -> list[dict]:
     return observations
 
 
-def checked_rules(config: dict, mode: str) -> dict:
+def checked_rules(config: dict, mode: str, *, reference_points: list[dict] | None = None) -> dict:
     exact = config["same-db"]
     if set(exact) != set(FIELDS):
         raise ValueError("验收配置必须同时包含场景 01 和 03")
@@ -78,7 +78,12 @@ def checked_rules(config: dict, mode: str) -> dict:
     intervals = config["rebuilt"]
     if set(intervals) != {"01"} or set(intervals["01"]) != MODEL_FIELDS:
         raise ValueError("重建区间只适用于 01 的写入格数、空格和两个率")
-    observations = observed_scores(config)
+    if config.get("basis") == "reference-workbook":
+        if not reference_points or len(reference_points) < 2:
+            raise ValueError("参考重建判据需要至少两个已核验的独立观察点")
+        observations = reference_points
+    else:
+        observations = observed_scores(config)
     for key, target in intervals["01"].items():
         valid = [score[key] for score in observations]
         if (not isinstance(target, list) or len(target) != 2

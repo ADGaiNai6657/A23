@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sqlite3
 from contextlib import closing
 from hashlib import sha256
@@ -41,6 +42,8 @@ def checked_outputs(directory: Path, basis: str, *, require_database: bool = Tru
         expected_basis = BASES[basis]
         if report.get("basis") != expected_basis:
             raise ValueError(f"{case}.basis 预期 {expected_basis!r}，实际 {report.get('basis')!r}")
+        if basis == "reference" and not re.fullmatch(r"[0-9a-f]{64}", report.get("reference_sha256") or ""):
+            raise ValueError(f"{case} 缺少有效的参考表 SHA256")
         identities = {
             "result_id": json_digest({
                 key: value for key, value in trace.items()
@@ -70,6 +73,42 @@ def checked_outputs(directory: Path, basis: str, *, require_database: bool = Tru
     return reports
 
 
+def validate_profile(config: dict, basis: str, reports: dict | None = None) -> None:
+    if config.get("basis") != BASES[basis]:
+        raise ValueError(f"判据的 basis 必须为 {BASES[basis]}")
+    if basis == "reference":
+        hashes = config.get("reference_sha256", {})
+        if set(hashes) != set(OUTPUTS) or not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes.values()):
+            raise ValueError("参考判据需分别为 01 和 03 指定参考表 SHA256")
+        if reports is not None:
+            for case, report in reports.items():
+                if report.get("reference_sha256") != hashes[case]:
+                    raise ValueError(f"{case} 评分参考表 SHA256 与独立判据不一致")
+
+
+def sample_rules(config: dict, mode: str, basis: str, config_dir: Path) -> dict:
+    validate_profile(config, basis)
+    points = None
+    if basis == "reference" and mode == "rebuilt":
+        points = []
+        for entry in config.get("observations", []):
+            directory = config_dir / entry["data_dir"]
+            point_mode = entry["mode"]
+            rebuilt_kind = entry.get("rebuilt_kind", "online")
+            if point_mode not in {"same-db", "rebuilt"} or rebuilt_kind not in {"online", "history"}:
+                raise ValueError("参考判据观察点的模式无效")
+            scores = checked_outputs(directory, basis)
+            validate_profile(config, basis, scores)
+            check_execution(directory, point_mode, scores, rebuilt_kind=rebuilt_kind)
+            points.append(scores["01"])
+        if (len({point["database_sha256"] for point in points}) != len(points)
+                or len({point["run_id"] for point in points}) != len(points)
+                or len({(point["source_sha256"], point["template_sha256"]) for point in points}) != 1
+                or not any(entry["mode"] == "rebuilt" for entry in config.get("observations", []))):
+            raise ValueError("参考观察点需要同一原文与模板、独立数据库及填写批次，且含重建记录")
+    return checked_rules(config, mode, reference_points=points)
+
+
 def check(scenarios: dict, expectations: dict, basis: str = "reference") -> list[str]:
     failures = []
     for scenario, rules in expectations.items():
@@ -93,8 +132,8 @@ def check(scenarios: dict, expectations: dict, basis: str = "reference") -> list
     return failures
 
 
-def print_criteria(config: dict, basis: str) -> None:
-    exact, rebuilt = (checked_rules(config, mode) for mode in ("same-db", "rebuilt"))
+def print_criteria(config: dict, basis: str, config_dir: Path) -> None:
+    exact, rebuilt = (sample_rules(config, mode, basis, config_dir) for mode in ("same-db", "rebuilt"))
     print("| 名称 | 键名 | 判据 | 判据类型 | 适用场景 | 失败时检查的位置 |")
     print("| --- | --- | --- | --- | --- | --- |")
     for case, fields in FIELDS.items():
@@ -112,25 +151,28 @@ def main() -> None:
     parser.add_argument("--expectations", type=Path, help="正式样本的实测判据 JSON")
     parser.add_argument("--mode", choices=("same-db", "rebuilt"), default="same-db")
     parser.add_argument("--rebuilt-kind", choices=("online", "history"), default="online")
-    parser.add_argument("--basis", choices=BASES, default="reference", help="原文核对或正式参考表评分")
+    parser.add_argument("--basis", choices=BASES, help="原文核对或正式参考表评分")
     parser.add_argument("--print-criteria", action="store_true", help="从权威配置生成六字段判据表")
     parser.add_argument("--check-existing", action="store_true", help="只检查指定目录的合成报告，不重新生成")
     args = parser.parse_args()
     try:
         config = load_expectations(args.expectations) if args.expectations else load_expectations()
+        basis = args.basis or ("source" if args.expectations or args.print_criteria else "reference")
+        config_dir = args.expectations.resolve().parent if args.expectations else BACKEND
         if args.print_criteria:
-            print_criteria(config, args.basis)
+            print_criteria(config, basis, config_dir)
             return
         if args.expectations is None:
             directory = args.data_dir
             if not args.check_existing:
                 _, directory, _, _ = build_demo(directory / "demo")
-            reports, expectations = checked_outputs(directory, args.basis, require_database=not args.check_existing), config["demo"]
+            reports, expectations = checked_outputs(directory, basis, require_database=not args.check_existing), config["demo"]
         else:
-            expectations = checked_rules(config, args.mode)
-            reports = checked_outputs(args.data_dir, args.basis)
+            expectations = sample_rules(config, args.mode, basis, config_dir)
+            reports = checked_outputs(args.data_dir, basis)
+            validate_profile(config, basis, reports)
             check_execution(args.data_dir, args.mode, reports, rebuilt_kind=args.rebuilt_kind)
-        failures = check(reports, expectations, args.basis)
+        failures = check(reports, expectations, basis)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
         parser.exit(1, f"验收失败：{error}\n")
     if failures:

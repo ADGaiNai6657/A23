@@ -110,7 +110,7 @@ work_a23=$(mktemp -d)
   --rebuilt-data-dir "$work_a23/rebuilt" --rebuilt-kind history
 ```
 
-执行真实空库重抽时，另选新的数据目录，在 `check_dataset.py` 中用 `--extract` 代替 `--archived-facts`，综合验收使用默认的 `--rebuilt-kind online`。抽取会把 01 城市报告分批发送到 DeepSeek 并计费。两种重建都会生成 `acceptance_run.json`，核对初始空库、最终库和本次填写。在线模式还核对原始响应与入库事实，历史模式核对事实归档。旧 `backend/data/actual/` 内的原始档案供查阅，本轮复验按上面的隔离路径生成。设置 `A23_SOURCE_CHECK_ROOT` 后，页面会对两套公开模板和字节匹配的原文生成本次独立核对报告。
+执行真实空库重抽时，另选新的数据目录，在 `check_dataset.py` 中用 `--extract` 代替 `--archived-facts`，综合验收使用默认的 `--rebuilt-kind online`。抽取会把 01 城市报告分批发送到 DeepSeek 并计费。两种重建都会生成 `acceptance_run.json`，用于核对初始空库、最终库和本次填写。在线模式读取数据库里的原文，检查全部块和 Prompt 摘要，并离线重放原始响应比对实际入库事实。随仓库交付的在线 ZIP 可用公开原文离线核验批次和留档事实。校验原库还需对应运行目录里的 `a23.db`。旧 `backend/data/actual/` 内的原始档案供查阅，当前复验按上面的隔离路径生成。设置 `A23_SOURCE_CHECK_ROOT` 后，页面会对两套公开模板和字节匹配的原文生成本次独立核对报告。
 
 ```sh
 A23_DOC_DIR="$work_a23/corpus/包含模板文件" A23_DATA_DIR="$work_a23/same" \
@@ -215,6 +215,15 @@ sudo journalctl -u a23 -n 50
 若服务使用自定义数据目录，传入同一个 `--data-dir`，例如 `--data-dir /var/lib/a23`。正式验收使用 `--basis reference` 和独立的正式判据，判据结构见下节。命令核对同一目录的数据库、输入摘要、工作簿和本次报告。请在复验脚本生成报告后运行验收命令。
 
 正式参考表默认检查固定行数及表头顺序。01 必须有 100 个城市的五列有效值，03 核对应填与应空分母。合成 API 评分需显式设置 `A23_SYNTHETIC_REFERENCE=1`，合成 CLI 评分需加 `--synthetic`。已有本次验收产物时，可用 `check_fill.py --score-existing` 加评分，保留填写批次。正式参考表成绩在材料到位后记录。[第四周任务](六周任务/第四周任务.md) · [第六周任务](六周任务/第六周任务.md)
+
+收到正式参考表后，分别给同库和重建目录中的 01、03 工作簿生成参考评分。命令使用 `check_fill.py <库内文档名> <模板路径> <参考表路径> --scenario 01 --data-dir <本次输出目录> --score-existing`，03 改用 `--scenario 03`。两种模式使用同一对参考表。
+
+```sh
+.venv/bin/python backend/verify.py --basis reference --expectations "$work_a23/reference-rules.json" \
+  --same-db-dir "$work_a23/same" --rebuilt-data-dir "$work_a23/rebuilt"
+```
+
+参考判据 JSON 的 `basis` 填 `reference-workbook`，`reference_sha256` 分别列出 `01` 和 `03` 的参考工作簿摘要。`same-db` 为两场景逐位判据，`rebuilt.01` 为写入格数、空着格数和两个率的区间。`observations` 至少列两条独立记录，每条包括相对于配置文件的 `data_dir` 及 `mode`，其中至少一条是 `rebuilt`。重建默认为在线；验收历史事实重建时，观察点和命令分别使用 `rebuilt_kind: history` 与 `--rebuilt-kind history`。正式判据的数值来自相应评分报告。
 
 ## 六周交接
 

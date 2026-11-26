@@ -35,6 +35,7 @@ const decisions = { filled: '已填写', refused: '已拒填', missing: '没有�
 const refusalLabels = {
   missing_fact: '缺少抽取事实', incompatible_value: '数值或单位不符',
   period_or_scope: '期次或统计口径不符',
+  metric_mismatch: '原文指标不符',
   source_blank: '原文缺值', conflict: '来源冲突',
 }
 const connections = { checking: '正在连接', online: '后端在线', offline: '后端未连接' }
@@ -466,6 +467,7 @@ function percent(value) {
                     <span v-if="option.source?.locator?.sheet"> · {{ option.source.locator.sheet }} 第 {{ option.source.locator.row }} 行</span>
                     <span v-if="option.fact?.period"> · {{ option.fact.period }} 年</span>
                     <span v-if="option.fact?.scope"> · {{ option.fact.scope }}</span>
+                    <span v-if="option.fact?.source_scope"> · 原文口径 {{ option.fact.source_scope }}</span>
                     <blockquote v-if="option.evidence_status === 'available'">{{ option.fact?.snippet || option.text }}</blockquote>
                     <span v-else-if="option.evidence_status === 'stale'"> · 原文已变更</span>
                   </li>
