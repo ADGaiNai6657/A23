@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 
 from fill_spec import (
     CITY_COLUMNS, CITY_HEADERS, CITY_OUTPUT, COUNTRY_KEYS, COVID_END, COVID_OUTPUT,
-    COVID_START, DATE_KEYS, choose_value, metric_key, normalize, number,
+    COVID_START, DATE_KEYS, choose_value, metric_key, normalize, number, spreadsheet_key,
 )
 from parser_xlsx import workbook_rows
 from store import Store
@@ -97,7 +97,7 @@ def city_rows(store: Store, doc: str) -> list[list[dict]]:
             r"^(?:\s*\d+[.、．]\s*)?([\u4e00-\u9fff]{2,12}?)(?=以|凭借|作为|在|紧随|的|，|,|：|:|（|\(|\s|GDP|地区生产总值|生产总值)",
             block["text"],
         )
-        if not match or any(char in match[1] for char in "与和及"):
+        if not match or re.search(r"[\u4e00-\u9fff]{2,}[与及、和][\u4e00-\u9fff]{2,}", match[1]):
             continue
         city = match[1]
         source = {"doc": doc, "block_no": index, "locator": block["locator"]}
@@ -138,7 +138,7 @@ def covid_rows(store: Store, doc: str, headers: tuple[str, ...]) -> list[list[di
         if day is None or not COVID_START <= day <= COVID_END or not country:
             continue
         source = {"doc": doc, "block_no": block_numbers.get((sheet, row)), "locator": {"sheet": sheet, "row": row}}
-        record = {metric_key(name): value for name, value in values.items()}
+        record = {spreadsheet_key(name): value for name, value in values.items()}
         candidates[day, country].append((record, source))
     if not candidates:
         raise ValueError("逐日数据没有与日期区间、日期列和国家列匹配的记录")
@@ -154,16 +154,25 @@ def covid_rows(store: Store, doc: str, headers: tuple[str, ...]) -> list[list[di
             if normalized in COUNTRY_KEYS:
                 values.append(cell(country, "国家或地区列", records[0][1]))
                 continue
-            key = metric_key(header)
+            key = spreadsheet_key(header)
             options = [
                 {"value": value, "source": source}
                 for record, source in records
-                if (value := number(record.get(key))) is not None
+                if (value := covid_value(key, record.get(key))) is not None
             ]
+            if not options:
+                values.append(cell(None, "匹配的来源行在该字段没有可用值", records[0][1]))
+                continue
             chosen, reason = choose_value(options)
             values.append(cell(chosen["value"] if chosen else None, reason, chosen["source"] if chosen else None))
         result.append(values)
     return result
+
+
+def covid_value(key: str, value: object) -> object:
+    if key == "continent":
+        return (value.strip() or None) if isinstance(value, str) else None
+    return number(value)
 
 
 def fill_workbook(store: Store, doc: str, template: Path, output_dir: Path) -> dict:

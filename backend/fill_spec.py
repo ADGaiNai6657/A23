@@ -38,6 +38,7 @@ METRIC_ALIASES = {
     "total_cases": ("累计确诊病例", "累计病例", "total_cases"),
     "new_deaths": ("新增死亡病例", "新增死亡", "new_deaths"),
     "total_deaths": ("累计死亡病例", "累计死亡", "total_deaths"),
+    "continent": ("大洲", "continent"),
 }
 COUNTRY_KEYS = ("location", "country", "countryregion", "countryname", "国家或地区", "国家地区", "国家", "国家名称", "国家或地区名称")
 DATE_KEYS = ("date", "日期", "统计日期")
@@ -63,6 +64,11 @@ def metric_key(metric: str) -> str:
         if alias in normalized:
             return ALIASES[alias]
     return normalized
+
+
+def spreadsheet_key(header: str) -> str:
+    normalized = normalize(header)
+    return ALIASES.get(normalized, normalized)
 
 
 def number(value: object) -> Decimal | None:

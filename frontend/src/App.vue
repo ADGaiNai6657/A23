@@ -5,8 +5,8 @@ import { api } from './api'
 const layouts = {
   city: {
     label: '01 城市经济',
-    doc: '输入_2025中国城市经济百强全景报告.docx',
-    template: '模板_2025中国城市经济百强.xlsx',
+    doc: '2025年中国城市经济百强全景报告.docx',
+    template: '2025年中国城市经济百强全景报告-模板.xlsx',
     output: 'filled_2025中国城市经济百强.xlsx',
     columns: 5,
     action: 'extract',
@@ -15,8 +15,8 @@ const layouts = {
   },
   daily: {
     label: '03 历史疫情逐日统计',
-    doc: '输入_COVID-19全球数据集_节选.xlsx',
-    template: '',
+    doc: 'COVID-19全球数据集（节选）.xlsx',
+    template: 'COVID-19 模板.xlsx',
     output: 'filled_covid19_byday.xlsx',
     columns: 7,
     action: 'ingest',
@@ -39,6 +39,7 @@ const template = ref(layout.value.template)
 const file = ref(null)
 const fileInput = ref(null)
 const dragging = ref(false)
+const preview = ref([])
 const metrics = ref('')
 const connection = ref('checking')
 const pending = ref(null)
@@ -72,6 +73,7 @@ function selectLayout() {
 function selectFile(selected) {
   feedback.value.input = null
   if (!selected) return
+  preview.value = []
   if (!/\.(txt|md|docx|xlsx)$/i.test(selected.name)) {
     file.value = null
     feedback.value.input = { error: true, text: '请选择 TXT、Markdown、DOCX 或 XLSX 文件。' }
@@ -97,6 +99,7 @@ function onDrop(event) {
 
 function clearFile() {
   file.value = null
+  preview.value = []
   feedback.value.input = null
   fileInput.value?.focus()
 }
@@ -129,6 +132,7 @@ function useFile(action) {
       text = `抽到 ${response.count} 条，保留 ${response.kept} 条有证据的事实。`
     } else {
       const count = action.id === 'parse' ? response.blocks.length : response.blocks
+      if (action.id === 'parse') preview.value = response.blocks.slice(0, 5)
       text = `${action.id === 'parse' ? '解析' : '导入'}完成，共 ${count} 个块。`
     }
     if (action.id !== 'parse') source.value = response.doc
@@ -136,12 +140,24 @@ function useFile(action) {
   })
 }
 
-async function fill() {
-  if (!source.value.trim() || !template.value.trim()) {
+async function fill(demo = false) {
+  if (demo && !file.value) {
+    feedback.value.input = { error: true, text: '请先选择要演示的源文档。' }
+    fileInput.value?.focus()
+    return
+  }
+  if ((!demo && !source.value.trim()) || !template.value.trim()) {
     feedback.value.fill = { error: true, text: '请输入文档名和模板文件名。' }
     return
   }
-  await run('fill', '正在填写表格', async () => {
+  await run('fill', demo ? '正在解析文档' : '正在填写表格', async () => {
+    if (demo) {
+      const parsed = await api.parse(file.value)
+      preview.value = parsed.blocks.slice(0, 5)
+      source.value = parsed.file
+      feedback.value.input = { text: `解析完成，共 ${parsed.blocks.length} 个块。` }
+      pending.value.label = '正在填写表格'
+    }
     const doc = source.value.trim()
     const started = performance.now()
     const summary = await api.fill(doc, template.value.trim())
@@ -154,6 +170,7 @@ async function fill() {
     feedback.value.detail = null
     row.value = 2
     column.value = 1
+    pending.value.label = '正在读取自检报告'
     try {
       report.value = await api.reports(doc, layout.value.output)
     } catch (failure) {
@@ -263,6 +280,14 @@ function percent(value) {
 
         <p v-if="feedback.input?.error" class="feedback feedback-error" role="alert">{{ feedback.input.text }}</p>
         <p v-else class="feedback" role="status">{{ pending?.area === 'input' ? `${pending.label}…` : feedback.input?.text }}</p>
+        <details v-if="preview.length" class="block-preview" open>
+          <summary>前 {{ preview.length }} 个文档块</summary>
+          <ol>
+            <li v-for="(block, index) in preview" :key="index" :value="block.locator.line ?? index + 1">
+              {{ block.text }}
+            </li>
+          </ol>
+        </details>
       </section>
 
       <section class="panel panel-fill" aria-labelledby="fill-heading">
@@ -274,7 +299,7 @@ function percent(value) {
           </div>
         </header>
 
-        <form @submit.prevent="fill">
+        <form @submit.prevent="fill()">
           <fieldset class="fill-controls" :disabled="Boolean(pending)">
             <fieldset class="scenario">
               <legend>模板类型</legend>
@@ -295,10 +320,12 @@ function percent(value) {
                 <input id="template-name" v-model="template" type="text" placeholder="模板_文件名.xlsx" required>
               </label>
             </div>
-            <button class="button button-primary fill-button" type="submit">
-              {{ pending?.area === 'fill' ? '正在填写…' : '开始填写' }}
-              <span v-if="pending?.area !== 'fill'" aria-hidden="true">→</span>
-            </button>
+            <div class="fill-actions">
+              <button class="button button-secondary" type="button" @click="fill(true)">一键演示</button>
+              <button class="button button-primary" type="submit">
+                开始填写 <span aria-hidden="true">→</span>
+              </button>
+            </div>
           </fieldset>
         </form>
 

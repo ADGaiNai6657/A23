@@ -26,7 +26,10 @@ REPORTS = {
 
 def find_template(name: str) -> Path:
     leaf_name(name)
-    if not name.lower().endswith(".xlsx") or not name.startswith("模板"):
+    filename = Path(name)
+    if filename.suffix.lower() != ".xlsx" or not (
+        filename.stem.startswith("模板") or filename.stem.endswith("模板")
+    ):
         raise ValueError("请选择任务材料中的 XLSX 模板")
     matches = [path for path in INPUTS.rglob("*") if path.name == name and path.is_file()
                and path.resolve().is_relative_to(INPUTS)]

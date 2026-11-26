@@ -5,6 +5,8 @@ dist/
 .env
 backend/data/*.db*
 backend/data/demo/
+backend/data/actual/
+dataset/测试集/
 .pytest_cache/
 .DS_Store
 .idea/
