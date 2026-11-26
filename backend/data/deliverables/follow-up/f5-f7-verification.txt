@@ -1,0 +1,54 @@
+原审计探针，当前代码
+old-F1 kept= 1 B2= None reason= metric_mismatch detected_scope= None
+old-F2 kept= 1 B2= None reason= period_or_scope detected_scope= 一季度
+gdp-increase kept= 1 B2= None reason= metric_mismatch detected_scope= None
+third-season kept= 1 B2= None reason= period_or_scope detected_scope= 第三季
+half-year-range kept= 1 B2= None reason= period_or_scope detected_scope= 一至六月
+annual-with-note kept= 1 B2= 100 reason= None detected_scope= None
+annual-standalone kept= 1 B2= 100 reason= None detected_scope= None
+.........................                                                [100%]
+25 passed, 6 deselected in 0.78s
+
+当前构建及公开原文验收
+✓ built in 228ms
+验收通过，共 19 条数值判据
+105 passed in 49.55s
+公开样本交付文件通过：source/same-db.zip（核对报告与工作簿）
+公开样本交付文件通过：source/rebuilt-history.zip（核对报告与工作簿）
+公开样本交付文件通过：follow-up/same-db.zip（核对报告与工作簿）
+公开样本交付文件通过：follow-up/city-online.zip（报告、工作簿、凭证和逐批离线重放；包内无数据库）
+source same-db 通过（19 条判据）：/tmp/a23-f5-f7.Um9JSo/after-same
+source rebuilt/online 通过（19 条判据）：/tmp/a23-audit-fix.MBSRG2/city-online
+综合验收通过，耗时 52.05 秒
+
+同模板受控参考与跨模板拒绝
+reference same-db 通过（19 条判据）：/private/tmp/a23-f5-f7.Um9JSo/f7-fixture/test_independent_reference_pro0/same
+reference rebuilt/history 通过（19 条判据）：/private/tmp/a23-f5-f7.Um9JSo/f7-fixture/test_independent_reference_pro0/rebuilt
+.
+1 passed, 29 deselected in 64.81s (0:01:04)
+验收失败：01.template_sha256 与参考区间观察点不一致：观察点 812fb892a58c0674f14610db88b42e312607e0b32e3bf6b1410b35685293e545，待验收 fff1b18bcd065890218fa73754775bf9d5265240732f999b5dced9d5417bf3f0
+105 passed in 49.44s
+综合验收失败：01.template_sha256 与参考区间观察点不一致：观察点 812fb892a58c0674f14610db88b42e312607e0b32e3bf6b1410b35685293e545，待验收 fff1b18bcd065890218fa73754775bf9d5265240732f999b5dced9d5417bf3f0
+
+既有 TXT 模型回应离线重放
+[{"run_id": "febb7e9360724b84b9cf41bbe1ac0b1b", "doc": "2024年药品流通行业运行统计分析报告.txt", "mode": "list", "count": 24, "kept": 24, "rejected": {}, "traceable": 24, "attempts": 3, "model_calls": 0, "seconds": 0.007}, {"run_id": "34ee533fcd36481da37e306c3ef73b72", "doc": "2024年药品流通行业运行统计分析报告.txt", "mode": "list", "count": 28, "kept": 28, "rejected": {}, "traceable": 28, "attempts": 3, "model_calls": 0, "seconds": 0.003}]
+两轮共同事实 6 条，差异见 /tmp/a23-f5-f7.Um9JSo/txt-replay/comparison.json
+
+从远程克隆发布基线
+Cloning into '/tmp/a23-f5-f7.Um9JSo/published'...
+bf8e6981f706b3e565c3fa32238edbd3c551a688
+89 passed in 24.86s
+综合验收通过，耗时 26.85 秒
+clone_to_verify_seconds=63
+source same-db 通过（19 条判据）：/tmp/a23-f5-f7.Um9JSo/published-same
+source rebuilt/history 通过（19 条判据）：/tmp/a23-f5-f7.Um9JSo/published-history
+综合验收通过，耗时 57.37 秒
+
+发布基线 Chrome 交互
+01 visible metrics: '数据行\n100\n写入格数\n500\n空格\n0\n填写耗时\n0.17 秒' '单元格准确率\n100.00%\n行完整率\n100.00%'
+Public 01 run 1: 100 rows, 500 cells, 0 blanks; both rates 100%; B2 detail in 0.016s
+01 visible metrics: '数据行\n100\n写入格数\n500\n空格\n0\n填写耗时\n0.06 秒' '单元格准确率\n100.00%\n行完整率\n100.00%'
+Public 01 run 2: 100 rows, 500 cells, 0 blanks; both rates 100%; B2 detail in 0.004s
+03 visible metrics: '数据行\n2542\n写入格数\n17464\n空格\n330\n填写耗时\n1.58 秒' '对格率\n100.00%\n误填率\n0.00%\n漏填率\n0.00%'
+Public 03: 2542 rows, 17464 written, 330 blanks, F3 provenance Data row 499
+Readable errors: unfilled report, unknown document, disconnected backend

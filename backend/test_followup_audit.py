@@ -1,13 +1,15 @@
 import json
 from pathlib import Path
+from shutil import copytree
 from zipfile import ZipFile
 
 import pytest
 from docx import Document
 from openpyxl import load_workbook
+from openpyxl.styles import Font
 
-from acceptance import DELIVERABLES, checked_outputs
-from check_dataset import CITY_FOLDER, CITY_SOURCE, check_dataset
+from acceptance import DELIVERABLES, checked_outputs, sample_rules
+from check_dataset import CITY_FOLDER, CITY_SOURCE, CITY_TEMPLATE as PUBLIC_CITY_TEMPLATE, check_dataset
 from config import ROOT
 from criteria import MODEL_FIELDS, load_expectations
 from demo import CITY_TEMPLATE, make_workbook
@@ -31,8 +33,33 @@ from verify import verify_samples
     ("2024年上半年GDP总量25亿元", "GDP总量25亿元", "25", "全年", "period_or_scope"),
     ("截至2024年6月，GDP总量25亿元", "GDP总量25亿元", "25", "", "period_or_scope"),
     ("一季度GDP总量25亿元，全年GDP总量100亿元", "GDP总量100亿元", "100", "", None),
+    ("2024年GDP总量100亿元，GDP同比增加10亿元", "GDP同比增加10亿元", "10", "", "metric_mismatch"),
+    ("GDP增速6%", "GDP增速6%", "6", "", "metric_mismatch"),
+    ("GDP比上年减少10亿元", "GDP比上年减少10亿元", "10", "", "metric_mismatch"),
+    ("GDP增长至100亿元", "GDP增长至100亿元", "100", "", None),
+    ("2024年第三季GDP总量25亿元", "第三季GDP总量25亿元", "25", "", "period_or_scope"),
+    ("2024年一至六月GDP总量25亿元", "一至六月GDP总量25亿元", "25", "", "period_or_scope"),
+    ("2024年1—6月GDP总量25亿元", "GDP总量25亿元", "25", "全年", "period_or_scope"),
+    ("全年GDP总量100亿元（其中一季度为25亿元）", "全年GDP总量100亿元", "100", "全年", None),
+    ("全年GDP总量100亿元（第三季GDP总量25亿元）", "全年GDP总量100亿元", "100", "", None),
+    ("全年GDP总量100亿元（第三季GDP总量25亿元）", "第三季GDP总量25亿元", "25", "", "period_or_scope"),
+    ("GDP总量25亿元（第三季）", "GDP总量25亿元", "25", "", "period_or_scope"),
+    ("全年GDP总量100亿元及第三季GDP总量25亿元", "全年GDP总量100亿元", "100", "", None),
+    ("第三季GDP总量25亿元及全年GDP总量100亿元", "全年GDP总量100亿元", "100", "", None),
+    ("第三季GDP总量25亿元（全年GDP总量100亿元）", "全年GDP总量100亿元", "100", "", None),
+    ("GDP于2024年全年达到100亿元", "GDP于2024年全年达到100亿元", "100", "", None),
 ])
 def test_city_quantity_is_bound_to_source_metric_and_scope(tmp_path, clause, quote, value, scope, code):
+    city_gdp = fill_city_claims(tmp_path, clause, [(quote, value, scope)])
+    assert city_gdp.get("reason_code") == code
+    if code:
+        assert city_gdp["value"] is None and city_gdp["conflicts"][0]["source"]["block_no"] == 2
+        assert bool(city_gdp["conflicts"][0]["fact"]["source_scope"]) == (code == "period_or_scope")
+    else:
+        assert city_gdp["value"] == value
+
+
+def fill_city_claims(tmp_path, clause, claims):
     doc, template = tmp_path / "城市.docx", tmp_path / CITY_TEMPLATE
     document = Document()
     document.add_paragraph("2024年中国城市经济百强全景报告")
@@ -41,17 +68,22 @@ def test_city_quantity_is_bound_to_source_metric_and_scope(tmp_path, clause, quo
     make_workbook(template, CITY_HEADERS)
     store = Store(tmp_path / "a23.db")
     content = {"facts": [{"block_no": 2, "entity": "甲城", "metric": "GDP总量",
-                          "value": value, "unit": "亿元", "snippet": quote, "scope": scope}]}
+                          "value": value, "unit": "亿元", "snippet": quote, "scope": scope}
+                         for quote, value, scope in claims]}
     extract_document(doc.read_bytes(), doc.name, [], store, lambda _: content)
     fill_workbook(store, doc.name, template, tmp_path)
     trace = json.loads((tmp_path / REPORT_FILES[CITY_OUTPUT][0]).read_bytes())
-    city_gdp = trace["cells"][1]
-    assert city_gdp.get("reason_code") == code
-    if code:
-        assert city_gdp["value"] is None and city_gdp["conflicts"][0]["source"]["block_no"] == 2
-        assert bool(city_gdp["conflicts"][0]["fact"]["source_scope"]) == (code == "period_or_scope")
-    else:
-        assert city_gdp["value"] == value
+    return trace["cells"][1]
+
+
+def test_city_total_remains_usable_when_change_and_partial_period_are_also_candidates(tmp_path):
+    detail = fill_city_claims(
+        tmp_path, "全年GDP总量100亿元（第三季GDP总量25亿元），GDP同比增加10亿元",
+        [("GDP同比增加10亿元", "10", ""), ("第三季GDP总量25亿元", "25", "全年"),
+         ("全年GDP总量100亿元", "100", "")],
+    )
+    assert detail["value"] == "100"
+    assert detail["fact"]["snippet"] == "全年GDP总量100亿元"
 
 
 @pytest.fixture(scope="module")
@@ -102,8 +134,17 @@ def test_independent_reference_profile_with_point_998_and_version_mismatch(tmp_p
     check_dataset(corpus, rebuilt, False, historical / "city-rebuilt-historical.json")
     fields = load_expectations()["same-db"]
     references = {}
-    for case, filename in (("01", CITY_OUTPUT), ("03", COVID_OUTPUT)):
+
+    def score_with_reference(directory, case, filename, reference):
         trace_name, score_name, _ = REPORT_FILES[filename]
+        trace = json.loads((directory / trace_name).read_bytes())
+        score = evaluate(directory / filename, reference, directory / score_name, trace["doc"], case == "03",
+                         expected_rows=fields[case]["rows"], block_count=trace["block_count"],
+                         database=directory / "a23.db")
+        if case == "01":
+            assert score["cell_accuracy"] == .998
+
+    for case, filename in (("01", CITY_OUTPUT), ("03", COVID_OUTPUT)):
         reference = tmp_path / f"reference-{case}.xlsx"
         book = load_workbook(same / filename)
         if case == "01":
@@ -112,12 +153,7 @@ def test_independent_reference_profile_with_point_998_and_version_mismatch(tmp_p
         book.close()
         references[case] = digest(reference)
         for directory in (same, rebuilt):
-            trace = json.loads((directory / trace_name).read_bytes())
-            score = evaluate(directory / filename, reference, directory / score_name, trace["doc"], case == "03",
-                             expected_rows=fields[case]["rows"], block_count=trace["block_count"],
-                             database=directory / "a23.db")
-            if case == "01":
-                assert score["cell_accuracy"] == .998
+            score_with_reference(directory, case, filename, reference)
     fields["01"]["cell_accuracy"] = .998
     config = {
         "basis": "reference-workbook", "reference_sha256": references, "same-db": fields,
@@ -138,3 +174,23 @@ def test_independent_reference_profile_with_point_998_and_version_mismatch(tmp_p
     score_path.write_bytes(original)
     with pytest.raises(ValueError, match="basis"):
         verify_samples(same, rebuilt, "source", "history", profile)
+
+    copied_corpus = tmp_path / "styled-corpus"
+    copytree(corpus, copied_corpus)
+    template = copied_corpus / "包含模板文件" / CITY_FOLDER / PUBLIC_CITY_TEMPLATE
+    book = load_workbook(template)
+    book.active["A1"].font = Font(italic=True)
+    book.save(template)
+    book.close()
+    styled_same, styled_rebuilt = tmp_path / "styled-same", tmp_path / "styled-rebuilt"
+    check_dataset(copied_corpus, styled_same, False, historical / "city-original-historical.json")
+    check_dataset(copied_corpus, styled_same, False)
+    check_dataset(copied_corpus, styled_rebuilt, False, historical / "city-rebuilt-historical.json")
+    for case, filename in (("01", CITY_OUTPUT), ("03", COVID_OUTPUT)):
+        for directory in (styled_same, styled_rebuilt):
+            score_with_reference(directory, case, filename, tmp_path / f"reference-{case}.xlsx")
+    reports = checked_outputs(styled_rebuilt, "reference")
+    with pytest.raises(ValueError, match=r"01\.template_sha256 与参考区间观察点不一致"):
+        sample_rules(config, "rebuilt", "reference", tmp_path, reports=reports)
+    with pytest.raises(ValueError, match=r"01\.template_sha256 与参考区间观察点不一致"):
+        verify_samples(styled_same, styled_rebuilt, "reference", "history", profile)

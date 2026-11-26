@@ -198,12 +198,18 @@ sudo journalctl -u a23 -n 50
 
 核心接口与版本字段见开发规格。`/reports` 可以在工作台用「读取报告」查看当前结果。点击已有库演示时需要先上传原文。试过的三个错误提示为「后端没有响应，请启动服务后重试。」「库里没有这份文档」「没有这份文档的填写记录」。[接口与评分约定](docs/开发规格.md#功能与验收)
 
-在项目根目录运行自动化与合成验收。先构建前端，以便覆盖静态页面路由。
+在项目根目录运行离线综合验收，包含自动化测试、合成评分、交付工件核验和公开在线归档重放。
 
 ```sh
-.venv/bin/python -m pytest -q backend
-.venv/bin/python backend/acceptance.py
+(cd frontend && npm run build)
+.venv/bin/python backend/verify.py
 ```
+
+| 验收入口 | 需要的材料 | 核对内容 |
+| --- | --- | --- |
+| 默认综合验收 | 已构建前端和随仓库交付的工件 | 合成流程、公开工作簿与报告、在线归档原文和批次重放 |
+| 综合验收带 `--same-db-dir` 和 `--rebuilt-data-dir` | 两个完整运行目录，包括原数据库和对应凭证 | 公开原文判据或独立参考判据，重建留档与数据库事实的一致性 |
+| `--basis reference --expectations` | 上述两个目录、同版参考工作簿评分和独立判据配置 | 按参考评分，绑定观察点与实际验收的原文、模板和参考版本 |
 
 正式材料到位后，按任务书把它们放入 `doc/` 并保留目录层级。在页面将所需文档入库后，用下列脚本填写并评估。根据实际文件名替换三个位置参数。页面刷新后可看到与这次结果匹配的评分。
 
@@ -223,7 +229,7 @@ sudo journalctl -u a23 -n 50
   --same-db-dir "$work_a23/same" --rebuilt-data-dir "$work_a23/rebuilt"
 ```
 
-参考判据 JSON 的 `basis` 填 `reference-workbook`，`reference_sha256` 分别列出 `01` 和 `03` 的参考工作簿摘要。`same-db` 为两场景逐位判据，`rebuilt.01` 为写入格数、空着格数和两个率的区间。`observations` 至少列两条独立记录，每条包括相对于配置文件的 `data_dir` 及 `mode`，其中至少一条是 `rebuilt`。重建默认为在线；验收历史事实重建时，观察点和命令分别使用 `rebuilt_kind: history` 与 `--rebuilt-kind history`。正式判据的数值来自相应评分报告。
+参考判据 JSON 的 `basis` 填 `reference-workbook`，`reference_sha256` 分别列出 `01` 和 `03` 的参考工作簿摘要。`same-db` 为两场景逐位判据，`rebuilt.01` 为写入格数、空着格数和两个率的区间。`observations` 至少列两条独立记录，每条包括相对于配置文件的 `data_dir` 及 `mode`，其中至少一条是 `rebuilt`。观察点必须与正在验收的 01 原文和模板字节一致，模板样式改变也需要该版本的观察点。重建默认为在线；验收历史事实重建时，观察点和命令分别使用 `rebuilt_kind: history` 与 `--rebuilt-kind history`。正式判据的数值来自相应评分报告。
 
 ## 六周交接
 
@@ -298,3 +304,5 @@ sudo journalctl -u a23 -n 50
 公开 01 的两个率原文核对均为 100%。同库两次填写耗时约 0.01 秒，03 约 0.6 秒。完整测试覆盖改坏评分和恢复，交叉验收本轮采用单人替代路径。[终端记录](backend/data/deliverables/acceptance-failures.txt) · [表 A/B/C](docs/六周验收记录.md#交叉验收)
 
 后续整改的在线空库重抽、TXT 复测及审计条目对照另有记录。[双轨审计补全记录](docs/双轨审计补全记录.md)
+
+本轮 01 总量和部分周期反例、跨模板观察点检查以及从远程克隆的复验见最新记录。[F5–F7 复验](docs/双轨审计F5-F7复验.md)

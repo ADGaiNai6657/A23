@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from time import perf_counter
 from zipfile import BadZipFile, ZipFile
 
-from acceptance import DELIVERABLES, DEMO_DELIVERY, check, checked_outputs, sample_rules, validate_profile
+from acceptance import DELIVERABLES, DEMO_DELIVERY, check, checked_outputs, sample_rules
 from config import BACKEND, DIST, ROOT
 from criteria import EXPECTATIONS, checked_rules, load_expectations
 from demo import build_demo, fill_demo
@@ -22,10 +22,14 @@ from unpack_dataset import unpack_dataset
 
 def verify_reports(directory: Path, basis: str, rules: dict, *, require_database: bool = True) -> dict:
     reports = checked_outputs(directory, basis, require_database=require_database)
+    require_rules(reports, basis, rules)
+    return reports
+
+
+def require_rules(reports: dict, basis: str, rules: dict) -> None:
     failures = check(reports, rules, basis)
     if failures:
         raise ValueError("\n".join(failures))
-    return reports
 
 
 def verify_damage(source: Path, root: Path, rules: dict) -> None:
@@ -111,9 +115,9 @@ def verify_samples(same: Path, rebuilt: Path, basis: str, rebuilt_kind: str, con
     config = load_expectations(config_path)
     checked, counts = {}, {}
     for mode, directory in (("same-db", same), ("rebuilt", rebuilt)):
-        rules = sample_rules(config, mode, basis, config_path.resolve().parent)
-        checked[mode] = verify_reports(directory, basis, rules)
-        validate_profile(config, basis, checked[mode])
+        checked[mode] = checked_outputs(directory, basis)
+        rules = sample_rules(config, mode, basis, config_path.resolve().parent, reports=checked[mode])
+        require_rules(checked[mode], basis, rules)
         check_execution(directory, mode, checked[mode], rebuilt_kind=rebuilt_kind)
         counts[mode] = sum(map(len, rules.values()))
     check_distinct_runs(checked["same-db"], checked["rebuilt"])

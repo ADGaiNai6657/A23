@@ -86,8 +86,10 @@ def validate_profile(config: dict, basis: str, reports: dict | None = None) -> N
                     raise ValueError(f"{case} 评分参考表 SHA256 与独立判据不一致")
 
 
-def sample_rules(config: dict, mode: str, basis: str, config_dir: Path) -> dict:
-    validate_profile(config, basis)
+def sample_rules(
+    config: dict, mode: str, basis: str, config_dir: Path, *, reports: dict | None = None,
+) -> dict:
+    validate_profile(config, basis, reports)
     points = None
     if basis == "reference" and mode == "rebuilt":
         points = []
@@ -106,6 +108,12 @@ def sample_rules(config: dict, mode: str, basis: str, config_dir: Path) -> dict:
                 or len({(point["source_sha256"], point["template_sha256"]) for point in points}) != 1
                 or not any(entry["mode"] == "rebuilt" for entry in config.get("observations", []))):
             raise ValueError("参考观察点需要同一原文与模板、独立数据库及填写批次，且含重建记录")
+        if reports is not None:
+            for key in ("source_sha256", "template_sha256"):
+                expected = points[0][key]
+                actual = reports["01"][key]
+                if actual != expected:
+                    raise ValueError(f"01.{key} 与参考区间观察点不一致：观察点 {expected}，待验收 {actual}")
     return checked_rules(config, mode, reference_points=points)
 
 
@@ -168,9 +176,8 @@ def main() -> None:
                 _, directory, _, _ = build_demo(directory / "demo")
             reports, expectations = checked_outputs(directory, basis, require_database=not args.check_existing), config["demo"]
         else:
-            expectations = sample_rules(config, args.mode, basis, config_dir)
             reports = checked_outputs(args.data_dir, basis)
-            validate_profile(config, basis, reports)
+            expectations = sample_rules(config, args.mode, basis, config_dir, reports=reports)
             check_execution(args.data_dir, args.mode, reports, rebuilt_kind=args.rebuilt_kind)
         failures = check(reports, expectations, basis)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
