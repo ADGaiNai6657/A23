@@ -34,6 +34,7 @@ const fileActions = [
 const decisions = { filled: '已填写', refused: '已拒填', missing: '没有记录' }
 const refusalLabels = {
   missing_fact: '缺少抽取事实', incompatible_value: '数值或单位不符',
+  period_or_scope: '期次或统计口径不符',
   source_blank: '原文缺值', conflict: '来源冲突',
 }
 const connections = { checking: '正在连接', online: '后端在线', offline: '后端未连接' }
@@ -456,6 +457,20 @@ function percent(value) {
                 <template v-else-if="detail.source.locator.paragraph">第 {{ detail.source.locator.paragraph }} 段</template>
               </p>
               <blockquote v-if="detail.text">{{ detail.text }}</blockquote>
+              <p v-if="detail.fact && detail.evidence_status === 'available'">事实原话 {{ detail.fact.snippet }} · 期次 {{ detail.fact.period || '未明确' }} · 口径 {{ detail.fact.scope || '原文未另列' }} · {{ detail.fact.mode }}</p>
+              <details v-if="detail.conflicts?.length" open>
+                <summary>候选事实与来源</summary>
+                <ul>
+                  <li v-for="(option, index) in detail.conflicts" :key="index">
+                    {{ option.value }} · {{ option.source?.field || option.fact?.metric }}
+                    <span v-if="option.source?.locator?.sheet"> · {{ option.source.locator.sheet }} 第 {{ option.source.locator.row }} 行</span>
+                    <span v-if="option.fact?.period"> · {{ option.fact.period }} 年</span>
+                    <span v-if="option.fact?.scope"> · {{ option.fact.scope }}</span>
+                    <blockquote v-if="option.evidence_status === 'available'">{{ option.fact?.snippet || option.text }}</blockquote>
+                    <span v-else-if="option.evidence_status === 'stale'"> · 原文已变更</span>
+                  </li>
+                </ul>
+              </details>
             </div>
           </div>
         </div>

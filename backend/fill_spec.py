@@ -4,6 +4,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 CITY_TEMPLATE = "模板_2025中国城市经济百强.xlsx"
+CITY_DOCUMENTS = frozenset({"2025年中国城市经济百强全景报告.docx", "输入_2025中国城市经济百强全景报告.docx"})
 CITY_OUTPUT = "filled_2025中国城市经济百强.xlsx"
 COVID_OUTPUT = "filled_covid19_byday.xlsx"
 REFERENCE_FILES = {CITY_OUTPUT: "参考_01.xlsx", COVID_OUTPUT: "参考_03.xlsx"}
@@ -63,17 +64,15 @@ ALIASES = {
     for key, aliases in METRIC_ALIASES.items()
     for alias in aliases
 }
-LONG_ALIASES = sorted(ALIASES, key=len, reverse=True)
+CANONICAL_METRICS = {normalize(key): key for key in METRIC_ALIASES}
+UNIT_LABEL = re.compile(
+    r"[（(]\s*(?:万亿元|亿元|万元|万|万人|万人口|元(?:[／/]人)?|人|例|张|万张|%)\s*[）)]\s*$"
+)
 
 
 def metric_key(metric: str) -> str:
-    normalized = normalize(metric)
-    if normalized in ALIASES:
-        return ALIASES[normalized]
-    for alias in LONG_ALIASES:
-        if alias in normalized:
-            return ALIASES[alias]
-    return normalized
+    normalized = normalize(UNIT_LABEL.sub("", metric))
+    return ALIASES.get(normalized, CANONICAL_METRICS.get(normalized, normalized))
 
 
 def spreadsheet_key(header: str) -> str:

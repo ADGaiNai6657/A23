@@ -11,11 +11,12 @@ from time import perf_counter
 from zipfile import BadZipFile, ZipFile
 
 from acceptance import DELIVERABLES, DEMO_DELIVERY, check, checked_outputs
-from config import BACKEND, ROOT
+from config import BACKEND, DIST, ROOT
 from criteria import EXPECTATIONS, checked_rules, load_expectations
 from demo import build_demo, fill_demo
 from fill_spec import CITY_OUTPUT, REPORT_FILES
 from filler import write_json
+from rebuild_evidence import check_distinct_runs, check_execution
 
 
 def verify_reports(directory: Path, basis: str, rules: dict, *, require_database: bool = True) -> dict:
@@ -84,8 +85,12 @@ def verify_demo(directory: Path, root: Path, rules: dict) -> None:
 
 
 def verify_published_archives(root: Path, config: dict) -> None:
-    for archive, mode in (("same-db.zip", "same-db"), ("rebuilt-history.zip", "rebuilt")):
-        with ZipFile(DELIVERABLES / "source" / archive) as bundle:
+    archives = (
+        ("source/same-db.zip", "same-db"), ("source/rebuilt-history.zip", "rebuilt"),
+        ("follow-up/same-db.zip", "same-db"), ("follow-up/city-online.zip", "rebuilt"),
+    )
+    for archive, mode in archives:
+        with ZipFile(DELIVERABLES / archive) as bundle:
             directory = root / archive
             bundle.extractall(directory)
         verify_reports(directory, "source", checked_rules(config, mode), require_database=False)
@@ -97,6 +102,7 @@ def main() -> None:
     parser.add_argument("--demo-reports", type=Path, default=DEMO_DELIVERY)
     parser.add_argument("--same-db-dir", type=Path, help="本轮同库填写及评分目录")
     parser.add_argument("--rebuilt-data-dir", type=Path, help="独立重建并评分的目录")
+    parser.add_argument("--rebuilt-kind", choices=("online", "history"), default="online")
     parser.add_argument("--basis", choices=("source", "reference"), default="source")
     args = parser.parse_args()
     extra_runs = {"same-db": args.same_db_dir, "rebuilt": args.rebuilt_data_dir}
@@ -104,6 +110,8 @@ def main() -> None:
         parser.error("样本验收同时需要 --same-db-dir 和 --rebuilt-data-dir")
     if args.same_db_dir and args.same_db_dir.resolve() == args.rebuilt_data_dir.resolve():
         parser.error("同库和重建库必须使用不同目录")
+    if not (DIST / "index.html").is_file():
+        parser.error("缺少 frontend/dist/index.html，请先在 frontend 执行 npm run build")
     started = perf_counter()
     try:
         with TemporaryDirectory(prefix="a23-verify-") as temporary:
@@ -111,16 +119,22 @@ def main() -> None:
             subprocess.run(
                 [sys.executable, "-m", "pytest", "-q", "backend"], cwd=ROOT, check=True,
                 env={**os.environ, "A23_TEST_REPORT_DIR": str(args.demo_reports.resolve()),
-                     "A23_DATA_DIR": str(root / "pytest")},
+                     "A23_DATA_DIR": str(root / "pytest"), "A23_REQUIRE_FRONTEND": "1"},
             )
             config = load_expectations(EXPECTATIONS)
             verify_demo(args.demo_reports, root, config["demo"])
             verify_published_archives(root, config)
+            checked = {}
             for mode, directory in extra_runs.items():
                 if directory is not None:
                     rules = checked_rules(config, mode)
-                    verify_reports(directory, args.basis, rules)
-                    print(f"{args.basis} {mode} 通过（{sum(map(len, rules.values()))} 条判据）：{directory}")
+                    checked[mode] = verify_reports(directory, args.basis, rules)
+                    check_execution(directory, mode, checked[mode], rebuilt_kind=args.rebuilt_kind)
+            if checked:
+                check_distinct_runs(checked["same-db"], checked["rebuilt"])
+                for mode, directory in extra_runs.items():
+                    label = f"{mode}/{args.rebuilt_kind}" if mode == "rebuilt" else mode
+                    print(f"{args.basis} {label} 通过（{sum(map(len, checked_rules(config, mode).values()))} 条判据）：{directory}")
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error,
             BadZipFile, subprocess.CalledProcessError) as error:
         parser.exit(1, f"综合验收失败：{error}\n")

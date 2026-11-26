@@ -1,11 +1,14 @@
 import json
 import math
+from hashlib import sha256
 from numbers import Real
 from pathlib import Path
+from zipfile import BadZipFile, ZipFile
 
 from config import BACKEND
 
 EXPECTATIONS = BACKEND / "data" / "source_expectations.json"
+OBSERVATION_FILES = BACKEND / "data" / "deliverables" / "source"
 FIELDS = {
     "01": {
         "block_count": "原文块数", "rows": "行数", "city_order_matches": "城市顺序一致行数",
@@ -30,6 +33,36 @@ def is_number(value: object) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def observed_scores(config: dict) -> list[dict]:
+    """Bind the historical numeric points to the archived facts and score, rather than labels alone."""
+    identities = set()
+    observations = []
+    for point in config.get("observations", []):
+        try:
+            extraction_id, archive = point["extraction_id"], point["score_archive"]
+            if Path(extraction_id).name != extraction_id or Path(archive).name != archive:
+                raise ValueError("归档名无效")
+            raw_facts = (OBSERVATION_FILES / (extraction_id + ".json")).read_bytes()
+            with ZipFile(OBSERVATION_FILES / archive) as bundle:
+                raw_score = bundle.read("source_report.json")
+            facts, score = json.loads(raw_facts), json.loads(raw_score)
+            identity = (sha256(raw_facts).hexdigest(), sha256(raw_score).hexdigest())
+            if (identity != (point["facts_sha256"], point["score_sha256"]) or identity in identities
+                    or facts["extraction_id"] != extraction_id or not facts["facts"]
+                    or facts["source_sha256"] != score["source_sha256"] or score["run_id"] != point["run_id"]
+                    or any(not is_number(score.get(key)) or score[key] != point["01"].get(key) for key in MODEL_FIELDS)):
+                raise ValueError("归档摘要、运行 ID、原文或数值不一致")
+        except (OSError, KeyError, ValueError, TypeError, BadZipFile) as error:
+            raise ValueError(f"重建区间需由至少两个独立重抽的实测值确定。观察点无效：{error}") from error
+        identities.add(identity)
+        observations.append(score)
+    if (len(observations) < 2 or len({row["run_id"] for row in observations}) != len(observations)
+            or len({facts_hash for facts_hash, _ in identities}) != len(observations)
+            or len({row["source_sha256"] for row in observations}) != 1):
+        raise ValueError("重建区间需由至少两个独立重抽的实测值确定")
+    return observations
+
+
 def checked_rules(config: dict, mode: str) -> dict:
     exact = config["same-db"]
     if set(exact) != set(FIELDS):
@@ -45,13 +78,11 @@ def checked_rules(config: dict, mode: str) -> dict:
     intervals = config["rebuilt"]
     if set(intervals) != {"01"} or set(intervals["01"]) != MODEL_FIELDS:
         raise ValueError("重建区间只适用于 01 的写入格数、空格和两个率")
+    observations = observed_scores(config)
     for key, target in intervals["01"].items():
-        valid = {
-            point["extraction_id"]: point["01"][key] for point in config.get("observations", [])
-            if point.get("extraction_id") and is_number(point.get("01", {}).get(key))
-        }
-        if (len(valid) < 2 or not isinstance(target, list) or len(target) != 2
+        valid = [score[key] for score in observations]
+        if (not isinstance(target, list) or len(target) != 2
                 or not all(is_number(value) for value in target)
-                or target != [min(valid.values()), max(valid.values())]):
+                or target != [min(valid), max(valid)]):
             raise ValueError(f"01.{key} 区间需由至少两个独立重抽的实测值确定，配置为 {target!r}")
     return {**exact, "01": {**exact["01"], **intervals["01"]}}

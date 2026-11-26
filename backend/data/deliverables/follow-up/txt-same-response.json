@@ -1,0 +1,47 @@
+{
+  "configuration": {
+    "doc": "2024年药品流通行业运行统计分析报告.txt",
+    "input_sha256": "c16cc00cd776162d2403f78bd83b3275def826d08f3387dc805bfd0c446b0b87",
+    "mode": "list",
+    "metrics": [
+      "销售总额",
+      "销售额",
+      "主营业务收入"
+    ],
+    "batch_size": 30,
+    "workers": 1,
+    "provider": "recorded-response",
+    "model": null,
+    "temperature": null,
+    "timeout_seconds": null
+  },
+  "runs": [
+    {
+      "run_id": "18bb9e105164490c8a459760b77280a6",
+      "doc": "2024年药品流通行业运行统计分析报告.txt",
+      "mode": "list",
+      "count": 24,
+      "kept": 24,
+      "rejected": {},
+      "traceable": 24,
+      "attempts": 3,
+      "model_calls": 0,
+      "seconds": 0.005
+    },
+    {
+      "run_id": "f7a6b34698194334824752f533974011",
+      "doc": "2024年药品流通行业运行统计分析报告.txt",
+      "mode": "list",
+      "count": 24,
+      "kept": 24,
+      "rejected": {},
+      "traceable": 24,
+      "attempts": 3,
+      "model_calls": 0,
+      "seconds": 0.004
+    }
+  ],
+  "shared": 24,
+  "first_only": [],
+  "second_only": []
+}

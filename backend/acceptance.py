@@ -10,6 +10,7 @@ from criteria import FIELDS, MODEL_FIELDS, checked_rules, is_number, load_expect
 from demo import build_demo
 from fill_spec import CITY_OUTPUT, COVID_OUTPUT, REPORT_FILES
 from filler import json_digest
+from rebuild_evidence import check_execution
 
 OUTPUTS = {"01": CITY_OUTPUT, "03": COVID_OUTPUT}
 BASES = {"source": "independent-source-check", "reference": "reference-workbook"}
@@ -110,6 +111,7 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=DATA)
     parser.add_argument("--expectations", type=Path, help="正式样本的实测判据 JSON")
     parser.add_argument("--mode", choices=("same-db", "rebuilt"), default="same-db")
+    parser.add_argument("--rebuilt-kind", choices=("online", "history"), default="online")
     parser.add_argument("--basis", choices=BASES, default="reference", help="原文核对或正式参考表评分")
     parser.add_argument("--print-criteria", action="store_true", help="从权威配置生成六字段判据表")
     parser.add_argument("--check-existing", action="store_true", help="只检查指定目录的合成报告，不重新生成")
@@ -127,6 +129,7 @@ def main() -> None:
         else:
             expectations = checked_rules(config, args.mode)
             reports = checked_outputs(args.data_dir, args.basis)
+            check_execution(args.data_dir, args.mode, reports, rebuilt_kind=args.rebuilt_kind)
         failures = check(reports, expectations, args.basis)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
         parser.exit(1, f"验收失败：{error}\n")

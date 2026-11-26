@@ -47,7 +47,7 @@
   },
   "observations": [
     {
-      "run_id": "749b9c3e89c9491c83a32fd64a878796",
+      "run_id": "7a31ef3f165b4e198f4bf06af1bf8251",
       "basis": "历史独立抽取 A，后来在 repair_same 隔离副本复验",
       "01": {
         "cell_accuracy": 1.0,
@@ -55,10 +55,13 @@
         "cells_written": 500,
         "row_completeness": 1.0
       },
-      "extraction_id": "city-original-historical"
+      "extraction_id": "city-original-historical",
+      "facts_sha256": "99e865ec13abdd172c241818da67f49d122b17573eca5711b1ff02c99f4415be",
+      "score_archive": "same-db.zip",
+      "score_sha256": "e38e9f525e9854568f1144b82dbab6335713d20e1e6477f80143ed4d7f0696b0"
     },
     {
-      "run_id": "1e5e4d27cc33455cb42ca6601d3a091c",
+      "run_id": "76654be4c5c2457eb3b2b4b60efa9795",
       "basis": "历史空库独立抽取 B，后来在 repair_rebuilt 隔离副本复验",
       "01": {
         "cell_accuracy": 1.0,
@@ -66,7 +69,10 @@
         "cells_written": 500,
         "row_completeness": 1.0
       },
-      "extraction_id": "city-rebuilt-historical"
+      "extraction_id": "city-rebuilt-historical",
+      "facts_sha256": "70b4b771cf2598ca9555f1d640334407686c6136a732f90332f15f86b9f35064",
+      "score_archive": "rebuilt-history.zip",
+      "score_sha256": "6a80e54889026183bb46a4eff127dc98e47301d293f53fb520cdea723788914c"
     }
   ],
   "demo": {

@@ -14,6 +14,7 @@ DEFAULT_INPUTS = ARCHIVE_TEMPLATES if ARCHIVE_TEMPLATES.is_dir() and not TRAININ
 INPUTS = Path(os.environ.get("A23_DOC_DIR", DEFAULT_INPUTS)).resolve()
 DIST = ROOT / "frontend" / "dist"
 REFERENCE_DIR = Path(value).resolve() if (value := os.getenv("A23_REFERENCE_DIR")) else None
+SYNTHETIC_REFERENCE = os.environ.get("A23_SYNTHETIC_REFERENCE") == "1"
 SOURCE_CHECK_ROOT = Path(value).resolve() if (value := os.getenv("A23_SOURCE_CHECK_ROOT")) else None
 
 

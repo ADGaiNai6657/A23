@@ -13,13 +13,14 @@ from fastapi.staticfiles import StaticFiles
 from openpyxl.utils.exceptions import InvalidFileException
 
 from check_dataset import score_published_fill
-from config import DATA, DIST, INPUTS, REFERENCE_DIR, SOURCE_CHECK_ROOT
+from config import DATA, DIST, INPUTS, REFERENCE_DIR, SOURCE_CHECK_ROOT, SYNTHETIC_REFERENCE
+from criteria import checked_rules, load_expectations
 from evaluate import evaluate
 from extractor import extract_document
 from fill_spec import CITY_OUTPUT, COVID_OUTPUT, REFERENCE_FILES, REPORT_FILES
 from filler import block_digest, fill_workbook, resolve_facts
 from parsers import leaf_name, parse_document
-from schema import ExtractResult, FillRequest, ParsedDoc
+from schema import ExtractResult, FactDecisionRequest, FillRequest, ParsedDoc
 from store import Store
 
 app = FastAPI(title="A23 文档理解与数据融合")
@@ -94,12 +95,29 @@ def facts(
     return resolve_facts(store.facts(), entity, metric, period, scope, preferred_doc)
 
 
+@app.post("/facts/decisions", status_code=201)
+def record_fact_decision(request: FactDecisionRequest) -> dict:
+    criteria = request.model_dump()
+    return store.record_fact_decision(criteria, lambda candidates: resolve_facts(
+        candidates, request.entity, request.metric, request.period, request.scope, request.preferred_doc,
+    ))
+
+
+@app.get("/facts/decisions/{decision_id}")
+def fact_decision(decision_id: int) -> dict:
+    record = store.fact_decision(decision_id)
+    if record is None:
+        raise HTTPException(404, "没有这条多源裁决记录")
+    return record
+
+
 @app.post("/fill")
 def fill(request: FillRequest, response: Response) -> dict:
     try:
         doc = leaf_name(request.doc)
         with fill_lock:
-            result = fill_workbook(store, doc, find_template(request.template), DATA, request.source_sha256)
+            result = fill_workbook(store, doc, find_template(request.template), DATA, request.source_sha256,
+                                   target_period=request.target_period)
             try:
                 score_filled(doc)
             except (OSError, ValueError, BadZipFile, InvalidFileException, KeyError, StopIteration):
@@ -118,8 +136,11 @@ def score_filled(doc: str) -> None:
     file = CITY_OUTPUT if doc.lower().endswith(".docx") else COVID_OUTPUT
     reference = REFERENCE_DIR / REFERENCE_FILES[file] if REFERENCE_DIR else None
     if reference is not None and reference.is_file():
+        rows = None if SYNTHETIC_REFERENCE else checked_rules(load_expectations(), "same-db")[
+            "03" if file == COVID_OUTPUT else "01"
+        ]["rows"]
         evaluate(DATA / file, reference, DATA / REPORT_FILES[file][1], doc, file == COVID_OUTPUT,
-                 block_count=len(store.blocks(doc)), database=store.path)
+                 expected_rows=rows, block_count=len(store.blocks(doc)), database=store.path)
     elif SOURCE_CHECK_ROOT:
         score_published_fill(SOURCE_CHECK_ROOT, DATA, store, file, doc)
 
@@ -157,7 +178,8 @@ def matching_score(file: str, trace: dict) -> dict | None:
 
 @app.get("/reports")
 def reports(doc: str, file: str = CITY_OUTPUT, result_id: str | None = None) -> dict:
-    score = matching_score(file, current_trace(doc, file, result_id))
+    with fill_lock:
+        score = matching_score(file, current_trace(doc, file, result_id))
     if score is None:
         raise HTTPException(404, "本次填写尚无匹配的自检报告")
     return score
@@ -168,7 +190,9 @@ def cell_detail(
     doc: str, file: str, row: Annotated[int, Query(ge=2)], column: Annotated[int, Query(ge=1)],
     result_id: str | None = None,
 ) -> dict:
-    fill_report = current_trace(doc, file, result_id)
+    with fill_lock:
+        fill_report = current_trace(doc, file, result_id)
+        evaluation = matching_score(file, fill_report)
     if row > fill_report["rows"] + 1 or column > (5 if file == CITY_OUTPUT else 7):
         raise HTTPException(404, "结果中没有这个格子")
     entry = next(
@@ -176,23 +200,27 @@ def cell_detail(
     )
     if entry is None:
         return {"decision": "missing", "reason": "这格没有填写记录"}
-    source = entry.get("source")
-    block = store.block(source["doc"], source["block_no"]) if source and source["block_no"] else None
-    verified = (
-        block is not None
-        and block["document_digest"].rsplit(":", 1)[-1] == fill_report["source_sha256"]
-        and block_digest(block) == source.get("block_sha256")
-    )
     graded = None
-    evaluation = matching_score(file, fill_report)
     if evaluation:
         diff = next((item for item in evaluation["diff"]
                      if item["row"] == row and item["column"] == column), None)
         graded = diff["decision"] if diff else "与本次核对依据一致"
     return {
-        **entry, "text": block["text"] if verified else None, "evaluation": graded,
-        "evidence_status": "stale" if source and not verified else "available" if verified else "none",
+        **entry, **read_cell_evidence(entry, fill_report["source_sha256"]), "evaluation": graded,
+        **({"conflicts": [
+            {**option, **read_cell_evidence(option, fill_report["source_sha256"])}
+            for option in entry["conflicts"]
+        ]} if "conflicts" in entry else {}),
     }
+
+
+def read_cell_evidence(entry: dict, source_sha256: str) -> dict:
+    source = entry.get("source")
+    block = store.block(source["doc"], source["block_no"]) if source and source["block_no"] else None
+    verified = (block is not None and block["document_digest"].rsplit(":", 1)[-1] == source_sha256
+                and block_digest(block) == source.get("block_sha256"))
+    return {"text": block["text"] if verified else None,
+            "evidence_status": "stale" if source and not verified else "available" if verified else "none"}
 
 
 @app.get("/files")
@@ -206,9 +234,14 @@ def files(name: str, result_id: str | None = None) -> Response:
     path = (DATA / name).resolve()
     if path.parent != DATA or not path.is_file():
         raise HTTPException(404, "结果文件不存在")
-    if result_id is not None:
-        content = path.read_bytes()
-        current_trace(None, name, result_id, content)
+    if result_id is not None or name in REPORT_FILES:
+        with fill_lock:
+            try:
+                content = path.read_bytes()
+            except FileNotFoundError as error:
+                raise HTTPException(404, "结果文件不存在") from error
+            if result_id is not None:
+                current_trace(None, name, result_id, content)
         return Response(
             content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
@@ -216,7 +249,8 @@ def files(name: str, result_id: str | None = None) -> Response:
     return FileResponse(path, filename=name)
 
 
-if (DIST / "index.html").is_file():
+FRONTEND_BUILT = (DIST / "index.html").is_file()
+if FRONTEND_BUILT:
     app.mount("/", StaticFiles(directory=DIST, html=True), name="frontend")
 else:
     @app.get("/")

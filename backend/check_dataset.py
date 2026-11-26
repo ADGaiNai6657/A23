@@ -11,14 +11,16 @@ from time import perf_counter
 from docx import Document
 from openpyxl import load_workbook
 
+from acceptance import check
 from config import BACKEND, ROOT
 from criteria import checked_rules, load_expectations
 from extractor import evidence_error
 from evaluate import matches
 from check_extract import recorded_extract
-from fill_spec import CITY_OUTPUT, COVID_OUTPUT, REPORT_FILES
-from filler import block_digest, fill_workbook, write_json
+from fill_spec import CITY_OUTPUT, COVID_END, COVID_OUTPUT, COVID_START, REPORT_FILES
+from filler import atomic_file, block_digest, fill_workbook, write_json
 from parsers import parse_document
+from rebuild_evidence import HISTORY_INPUT, RUN_EVIDENCE, digest
 from schema import RawFact
 from store import Store
 
@@ -80,7 +82,7 @@ def daily_expected(path: Path) -> tuple[list[tuple], list[dict]]:
             if not isinstance(row[indices[0]], datetime):
                 continue
             day = row[indices[0]].date()
-            if date(2020, 7, 1) <= day <= date(2020, 8, 31):
+            if COVID_START <= day <= COVID_END:
                 key = (day, row[indices[1]])
                 if key in selected:
                     raise ValueError(f"03 原文核对发现重复日期和国家键 {key}")
@@ -134,14 +136,17 @@ def verify_trace(store: Store, path: Path, locators: list[dict], columns: int) -
         raise ValueError(f"逐格记录数量或坐标不符：{path.name}")
     for item in report["cells"]:
         source = item["source"]
-        if source is None or not item["reason"]:
+        alternatives = [option["source"] for option in item.get("conflicts", ())]
+        sources = [source] if source is not None else alternatives if item.get("reason_code") == "conflict" else []
+        if not sources or not item["reason"]:
             raise ValueError(f"逐格记录缺少原文位置或原因：{path.name} {item['row']},{item['column']}")
-        block = by_number.get(source["block_no"])
-        if (
-            not block or source["doc"] != report["doc"]
-            or source["locator"] != block["locator"]
-            or source["locator"] != locators[item["row"] - 2]
-            or source.get("block_sha256") != block_digest(block)
+        anchor = locators[item["row"] - 2]
+        if not any(candidate["locator"] == anchor for candidate in sources):
+            raise ValueError(f"逐格记录缺少对应输出行的源定位：{path.name} {item['row']},{item['column']}")
+        if any(
+            (block := by_number.get(candidate["block_no"])) is None or candidate["doc"] != report["doc"]
+            or candidate["locator"] != block["locator"] or candidate.get("block_sha256") != block_digest(block)
+            for candidate in sources + alternatives
         ):
             raise ValueError(f"逐格记录源定位无法回查：{path.name} {item['row']},{item['column']}")
         if columns == 7 and item["column"] >= 3 and item["decision"] == "filled":
@@ -250,13 +255,27 @@ def check_dataset(root: Path, output: Path, extract: bool, archived_facts: Path 
     daily_source = templates / DAILY_FOLDER / DAILY_SOURCE
     daily_template = daily_source.with_name(DAILY_TEMPLATE)
     store = Store(output / "a23.db")
+    mode = "rebuilt" if extract or archived_facts is not None else "same-db"
+    initial_hash = digest(store.path) if store.path.is_file() else None
+    expectations = checked_rules(load_expectations(), mode)
+    evidence = {"mode": mode, "initial_database_sha256": initial_hash}
+    if mode == "rebuilt" and initial_hash is not None:
+        raise ValueError("重建验收要求初始空库，请指定新的 --data-dir")
+    if mode == "same-db" and initial_hash is None:
+        raise ValueError("同库验收需要已有 a23.db，请先用 --extract 或 --archived-facts 建库")
     if archived_facts is not None:
         restore_city_facts(store, city_source, archived_facts)
+        archive = output / HISTORY_INPUT
+        atomic_file(archive, lambda target: target.write_bytes(archived_facts.read_bytes()))
+        evidence.update({"extraction_kind": "history", "extraction_sha256": digest(archive),
+                         "extraction_id": json.loads(archive.read_bytes())["extraction_id"]})
     if extract:
         print("正在调用 DeepSeek 抽取 01 城市原文", flush=True)
         run = recorded_extract(city_source, city_source.read_bytes(), CITY_METRICS, store, 1)
         extraction = {**run["result"], **{key: run[key] for key in ("run_id", "model", "seconds")}}
         write_json(output / "city_extraction.json", extraction)
+        evidence.update({"extraction_kind": "online", "extraction_id": run["run_id"],
+                         "extraction_sha256": digest(output / "extraction-runs" / f"{run['run_id']}.json")})
     if not store.facts(CITY_SOURCE):
         raise ValueError("还没有 01 事实，请加 --extract 从城市报告抽取")
     inventory = parse_corpus(root, store)
@@ -279,7 +298,8 @@ def check_dataset(root: Path, output: Path, extract: bool, archived_facts: Path 
         raise ValueError("逐日原文的空格数与验收配置不一致")
 
     results = {}
-    database_sha256 = hashlib.sha256(store.path.read_bytes()).hexdigest()
+    scores = {}
+    database_sha256 = digest(store.path)
     for name, source, template, workbook, expected, locators, width in (
         ("01", CITY_SOURCE, city_template, CITY_OUTPUT, expected_city, city_locators, 5),
         ("03", DAILY_SOURCE, daily_template, COVID_OUTPUT, expected_daily, daily_locators, 7),
@@ -297,12 +317,14 @@ def check_dataset(root: Path, output: Path, extract: bool, archived_facts: Path 
                 raise ValueError(f"{name} 同库两次填写结果不一致")
             previous = current
         results[name] = {**current, "fill_seconds": timings, "block_count": len(store.blocks(source))}
-        write_json(output / score_file, source_score(trace, audit, name == "03", database_sha256))
+        scores[name] = source_score(trace, audit, name == "03", database_sha256)
+        write_json(output / score_file, scores[name])
         if hashlib.sha256(template.read_bytes()).hexdigest() != originals[template]:
             raise ValueError(f"模板原件出现变更：{template.name}")
 
     report = {
         "basis": "independent-source-check",
+        "mode": mode,
         "corpus": inventory,
         "scenarios": results,
         "daily_context": {
@@ -312,12 +334,17 @@ def check_dataset(root: Path, output: Path, extract: bool, archived_facts: Path 
         },
     }
     write_json(output / "source_audit.json", report)
-    if any(
-        item["differences"] or item["rows"] != rows or item["columns"] != columns
-        for item, rows, columns in ((results["01"], city_rules["rows"], 5),
-                                    (results["03"], daily_rules["rows"], 7))
-    ):
-        raise ValueError(f"存在原文核对差异，详见 {output / 'source_audit.json'}")
+    write_json(output / RUN_EVIDENCE, {
+        **evidence, "database_sha256": database_sha256,
+        "outputs": {case: {key: score[key] for key in ("run_id", "source_sha256", "template_sha256", "workbook_sha256")}
+                    for case, score in scores.items()},
+    })
+    failures = check(scores, expectations, "source")
+    for name, width in (("01", 5), ("03", 7)):
+        if results[name]["columns"] != width:
+            failures.append(f"{name} 输出列数预期 {width}，实际 {results[name]['columns']}")
+    if failures:
+        raise ValueError("\n".join(failures) + f"\n完整差异见 {output / 'source_audit.json'}")
     return report
 
 

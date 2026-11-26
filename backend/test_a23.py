@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
@@ -181,11 +182,14 @@ def test_download_validation(client):
 
 
 def test_built_frontend_is_served(client):
-    if not (main.DIST / "index.html").is_file():
+    if not main.FRONTEND_BUILT and os.getenv("A23_REQUIRE_FRONTEND") != "1":
         pytest.skip("先在 frontend/ 构建页面")
     response = client.get("/")
     assert response.status_code == 200
     assert "文档理解与填表" in response.text
+    assets = re.findall(r'(?:src|href)="(/assets/[^"]+)"', response.text)
+    assert assets and any(asset.endswith(".js") for asset in assets)
+    assert all(client.get(asset).status_code == 200 for asset in assets)
 
 
 def test_unknown_document_cannot_fill(client):
@@ -427,6 +431,7 @@ def test_daily_empty_database_upload_fill_score_download_and_evidence(tmp_path, 
     monkeypatch.setattr(main, "DATA", outputs)
     monkeypatch.setattr(main, "INPUTS", inputs)
     monkeypatch.setattr(main, "REFERENCE_DIR", inputs)
+    monkeypatch.setattr(main, "SYNTHETIC_REFERENCE", True)
     monkeypatch.setattr(main, "store", store)
     client = TestClient(main.app)
     upload = {"file": (DAILY_DOC, (inputs / DAILY_DOC).read_bytes())}
@@ -447,7 +452,7 @@ def test_daily_empty_database_upload_fill_score_download_and_evidence(tmp_path, 
     assert detail["source"]["locator"] == {"sheet": "Sheet", "row": 3}
 
 
-def test_real_corpus_fusion_conflict(tmp_path):
+def test_real_corpus_fusion_conflict(tmp_path, monkeypatch):
     data = json.loads((DEMO_DELIVERY.parent / "source" / "fusion-real.json").read_bytes())
     corpus = tmp_path / "corpus"
     unpack_dataset(ROOT / "dataset" / "测试集.zip", corpus)
@@ -472,6 +477,20 @@ def test_real_corpus_fusion_conflict(tmp_path):
     assert evidence["selected"] is None
     preferred = resolve_facts(facts, entity, metric, period, scope, preferred_doc=Path(data["candidates"][1]["path"]).name)
     assert preferred["selected"]["value"] == "1029.8" and len(preferred["candidates"]) == 2
+    monkeypatch.setattr(main, "store", store)
+    client = TestClient(main.app)
+    criteria = {"entity": entity, "metric": metric, "period": period, "scope": scope,
+                "preferred_doc": preferred["selected"]["doc"]}
+    response = client.post("/facts/decisions", json=criteria)
+    assert response.status_code == 201
+    receipt = response.json()
+    assert receipt["criteria"] == criteria and receipt["selected"]["value"] == "1029.8"
+    assert all(len(candidate["source_sha256"]) == 64 for candidate in receipt["candidates"])
+    raw = "新版统计公报".encode()
+    store.save(parse_document(raw, criteria["preferred_doc"]), raw)
+    history = client.get(f"/facts/decisions/{receipt['decision_id']}").json()
+    assert history["selected"] == receipt["selected"]
+    assert client.get(f"/facts/decisions/{receipt['decision_id'] + 1}").status_code == 404
 
 
 def test_city_refusals_explain_missing_fact_and_incompatible_unit(tmp_path):
@@ -497,6 +516,7 @@ def test_city_empty_database_extract_with_model_substitute_and_fill(tmp_path, mo
     monkeypatch.setattr(main, "DATA", outputs)
     monkeypatch.setattr(main, "INPUTS", inputs)
     monkeypatch.setattr(main, "REFERENCE_DIR", inputs)
+    monkeypatch.setattr(main, "SYNTHETIC_REFERENCE", True)
     monkeypatch.setattr(main, "store", store)
     monkeypatch.setattr(main, "extract_document", lambda data, name, metrics, target: extract_document(
         data, name, metrics, target, demo_response,

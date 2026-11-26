@@ -12,7 +12,7 @@ import httpx
 from pydantic import ValidationError
 
 from config import api_key
-from fill_spec import metric_key, number
+from fill_spec import metric_key, normalize, number
 from parsers import parse_document
 from schema import Block, RawFact, RawFacts
 from store import Store
@@ -25,6 +25,9 @@ REQUEST_TIMEOUT = 60
 YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?=年|\b)")
 ISO_DAY = re.compile(r"(?<!\d)(?:19|20)\d{2}-\d{2}-\d{2}(?!\d)")
 HEADING = re.compile(r"^[#\s]*(?:19|20)\d{2}\s*(?:年(?:度)?\s*[^。；;：:，,]*)?$")
+LOCAL_HEADING = re.compile(r"^[^，,：:。；;]{0,16}(?:19|20)\d{2}年(?:度)?(?:数据|统计)?(?:如下|情况|概况|综述)?$")
+CITY_TITLE = re.compile(r"^\s*((?:19|20)\d{2})\s*年\s*中国城市经济百强")
+NUMBER_TOKEN = re.compile(r"[+\-−]?(?:(?:\d{1,3}(?:[,，]\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][+\-]?\d+)?")
 
 
 class ModelFormatError(ValueError):
@@ -50,12 +53,25 @@ def evidence_error(fact: RawFact, blocks: dict[int, Block]) -> str | None:
     if not block:
         return "块号不在本批"
     snippet = compact(fact.snippet)
-    if not snippet or snippet not in compact(block.text):
+    text = compact(block.text)
+    if not snippet or snippet not in text:
         return "原话与原文块不符"
-    value = re.sub(r"[,，]", "", compact(fact.value))
-    if not value or value not in re.sub(r"[,，]", "", snippet):
+    value = compact(fact.value)
+    quantity = NUMBER_TOKEN.match(value)
+    if not quantity:
         return "原话缺少数值"
-    return None
+    target = quantity.group().replace(",", "").replace("，", "").replace("−", "-")
+    suffix = value[quantity.end():]
+    # Match in the full block so a quote cannot cut a longer number in half.
+    for found in NUMBER_TOKEN.finditer(text):
+        token = found.group().replace(",", "").replace("，", "").replace("−", "-")
+        end = found.end() + len(suffix)
+        if token == target and text[found.end():end] == suffix:
+            left = max(0, end - len(snippet))
+            start = text.find(snippet, left, found.start() + len(snippet))
+            if 0 <= start <= found.start() and end <= start + len(snippet):
+                return None
+    return "原话缺少数值"
 
 
 def periods(blocks: list[tuple[int, Block]]) -> dict[int, tuple[str, int | None]]:
@@ -63,7 +79,7 @@ def periods(blocks: list[tuple[int, Block]]) -> dict[int, tuple[str, int | None]
     current = ("", None)
     for index, block in blocks:
         headings[index] = current
-        if HEADING.fullmatch(block.text):
+        if CITY_TITLE.match(block.text) or HEADING.fullmatch(block.text):
             years = YEAR.findall(block.text)
             if years:
                 current = (max(years), index)
@@ -74,19 +90,30 @@ def period_for(fact: RawFact, block: Block, inherited: tuple[str, int | None]) -
     text = compact(block.text)
     quote = compact(fact.snippet)
     start = text.find(quote)
-    left = max((text.rfind(char, 0, start) for char in "。！？；"), default=-1)
-    right = min(
-        (end for char in "。！？；" if (end := text.find(char, start + len(quote))) >= 0),
-        default=len(text),
-    )
-    sentence = text[left + 1:right]
-    for value in reversed(sorted(ISO_DAY.findall(sentence))):
+    if not quote or start < 0:
+        return inherited
+    left = max(text.rfind(char, 0, start) for char in "。！？；;,，")
+    context = text[left + 1:start + len(quote)]
+    for value in reversed(ISO_DAY.findall(context)):
         try:
             return date.fromisoformat(value).isoformat(), fact.block_no
         except ValueError:
             continue
-    years = YEAR.findall(sentence)
-    return (max(years), fact.block_no) if years else inherited
+    years = YEAR.findall(context)
+    if years:
+        return max(years), fact.block_no
+    # A local heading can introduce the following sentence, but a preceding factual claim cannot.
+    prefix = text[:left].rstrip("。！？；;,，") if left >= 0 else ""
+    previous = re.split(r"[。！？；;,，：:]", prefix)[-1]
+    if LOCAL_HEADING.fullmatch(previous):
+        return YEAR.findall(previous)[-1], fact.block_no
+    sentence_left = max(text.rfind(char, 0, start) for char in "。！？；;")
+    sentence_right = min((end for char in "。！？；;"
+                          if (end := text.find(char, start + len(quote))) >= 0), default=len(text))
+    years = YEAR.findall(text[sentence_left + 1:sentence_right])
+    if years:
+        return max(years), fact.block_no
+    return inherited
 
 
 def model_response(prompt: str) -> ModelReply:
@@ -166,6 +193,7 @@ def extract_batches(
     preceding = periods(blocks)
     source_blocks = blocks[:XLSX_MODEL_ROWS] if name.lower().endswith(".xlsx") else blocks
     collected = []
+    seen = set()
     rejected = {}
     count = 0
 
@@ -232,18 +260,24 @@ def extract_batches(
                 decision.update({"evidence_error": reason, "metric_key": key})
                 if allowed and key not in allowed:
                     reason = reason or "指标不在清单内"
+            if not reason:
+                numeric = number(fact.value)
+                period, period_block = period_for(fact, batch[fact.block_no], preceding[fact.block_no])
+                identity = (fact.block_no, fact.entity.strip(), key, numeric if numeric is not None else compact(fact.value),
+                            normalize(fact.unit), period, fact.scope.strip(), compact(fact.snippet))
+                if identity in seen:
+                    reason = "重复事实"
+                else:
+                    seen.add(identity)
+                    collected.append((
+                        fact.block_no, fact.entity.strip(), fact.metric, key, fact.value,
+                        str(numeric) if numeric is not None else None, fact.unit.strip(), fact.snippet,
+                        period, period_block, fact.scope.strip(),
+                    ))
             if audit is not None:
                 logs[index]["decisions"].append({**decision, "rejected": reason})
             if reason:
                 rejected[reason] = rejected.get(reason, 0) + 1
-                continue
-            numeric = number(fact.value)
-            period, period_block = period_for(fact, batch[fact.block_no], preceding[fact.block_no])
-            collected.append((
-                fact.block_no, fact.entity.strip(), fact.metric, key, fact.value,
-                str(numeric) if numeric is not None else None, fact.unit.strip(), fact.snippet,
-                period, period_block, fact.scope.strip(),
-            ))
 
     result = {"doc": name, "mode": mode, "count": count, "kept": len(collected), "rejected": rejected}
     if audit is not None:

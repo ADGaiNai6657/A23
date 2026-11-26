@@ -62,7 +62,7 @@ DEEPSEEK_API_KEY=你的实际密钥
 
 ```sh
 .venv/bin/python backend/demo.py
-(cd backend && A23_DOC_DIR=data/demo/doc A23_DATA_DIR=data/demo/data A23_REFERENCE_DIR=data/demo/doc \
+(cd backend && A23_DOC_DIR=data/demo/doc A23_DATA_DIR=data/demo/data A23_REFERENCE_DIR=data/demo/doc A23_SYNTHETIC_REFERENCE=1 \
   ../.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000)
 ```
 
@@ -74,6 +74,7 @@ Set-Location backend
 $env:A23_DOC_DIR = "$PWD\data\demo\doc"
 $env:A23_DATA_DIR = "$PWD\data\demo\data"
 $env:A23_REFERENCE_DIR = "$PWD\data\demo\doc"
+$env:A23_SYNTHETIC_REFERENCE = "1"
 ..\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -89,7 +90,7 @@ $env:A23_REFERENCE_DIR = "$PWD\data\demo\doc"
 1. 把模板放到项目根目录的 `doc/` 下，保留原始模板和参考表。页面填写的是以「模板」开头或结尾的 XLSX 文件名，同名模板在材料目录中只能有一份。指定了 `A23_DOC_DIR` 时，将模板放到指定目录。项目自带测试集的用法见下节。
 2. 在「文档入库」选择源文件。「查看解析块数」支持四种格式，适合先检查结构。要做 01，选城市报告 DOCX，填写可选的逗号分隔指标清单，然后点「抽取事实并入库」。要做 03，选逐日统计 XLSX，点「仅导入文档块」。
 3. 在「填写与验收」选择 01 或 03，核对库里的文档名和模板名，点「开始填写」。完成后可以下载 Excel，以及按行列号查值、原文和拒填理由。与该版本匹配的评分会标注为「参考表评分」或「独立原文核对」。同名文件内容变更后，请先重新导入或抽取。
-4. 如需比较多份文档的事实，在 `/docs` 中调用 `GET /facts`。用主体、指标、期次和口径定位候选。明确来源优先级时指定 `preferred_doc`，可同时查看其余候选。
+4. 如需比较多份文档的事实，在 `/docs` 中调用 `GET /facts`。用主体、指标、期次和口径定位候选。有明确来源时指定 `preferred_doc`。用相同字段请求 `POST /facts/decisions` 可保存候选、采用项与理由，凭返回的 ID 查询。
 
 「一键演示（已有库）」走解析、填写、读报告，要求库内已保存同一版本原文及所需事实。「从上传开始」会先为 01 调用 DeepSeek 抽取入库，或为 03 导入 XLSX 再填写。01 会在发出请求前提示密钥、耗时和费用。直接填写目前对应 01 和 03 的模板结构。TXT 和 Markdown 的块编号使用原文行号，DOCX 和 XLSX 使用文档内块序号。XLSX 的块可以全量入库，交给模型抽取的范围是前 200 个非空数据行。03 填表直接使用指定日期区间的结构化数据。
 
@@ -105,10 +106,11 @@ work_a23=$(mktemp -d)
 .venv/bin/python backend/check_dataset.py --root "$work_a23/corpus" --data-dir "$work_a23/same"
 .venv/bin/python backend/check_dataset.py --root "$work_a23/corpus" --data-dir "$work_a23/rebuilt" \
   --archived-facts backend/data/deliverables/source/city-rebuilt-historical.json
-.venv/bin/python backend/verify.py --same-db-dir "$work_a23/same" --rebuilt-data-dir "$work_a23/rebuilt"
+.venv/bin/python backend/verify.py --same-db-dir "$work_a23/same" \
+  --rebuilt-data-dir "$work_a23/rebuilt" --rebuilt-kind history
 ```
 
-执行真实空库重抽时，另选新的数据目录，在 `check_dataset.py` 中用 `--extract` 代替 `--archived-facts`。它会把 01 城市报告分批发送到 DeepSeek，使用本地密钥并计费。设置 `A23_SOURCE_CHECK_ROOT` 后，页面会对两套公开模板和字节匹配的原文生成本次独立核对报告。
+执行真实空库重抽时，另选新的数据目录，在 `check_dataset.py` 中用 `--extract` 代替 `--archived-facts`，综合验收使用默认的 `--rebuilt-kind online`。抽取会把 01 城市报告分批发送到 DeepSeek 并计费。两种重建都会生成 `acceptance_run.json`，核对初始空库、最终库和本次填写。在线模式还核对原始响应与入库事实，历史模式核对事实归档。旧 `backend/data/actual/` 内的原始档案供查阅，本轮复验按上面的隔离路径生成。设置 `A23_SOURCE_CHECK_ROOT` 后，页面会对两套公开模板和字节匹配的原文生成本次独立核对报告。
 
 ```sh
 A23_DOC_DIR="$work_a23/corpus/包含模板文件" A23_DATA_DIR="$work_a23/same" \
@@ -142,7 +144,7 @@ GBK TXT、CSV 和损坏 DOCX 实测均返回 400。以下四格式抽取数据�
 | XLSX | 通用 | 15,088 | 2,430 | 2,390 | 40 | 276.79 |
 | XLSX | 清单 | 15,088 | 400 | 400 | 0 | 24.61 |
 
-指标保留原文说法，同义词映射覆盖 GDP、人口、财政、销售和逐日病例等十余项。期次优先读数值所在句，其次继承最近年份标题。两份真实公开公报的同键床位数分别为 1037 和 1029.8 万张，默认保留两条，指定来源后可选用一条。[多源复核](backend/data/deliverables/source/fusion-real.json)
+指标保留原文说法，同义词按显式清单归并。GDP 总量、GDP 增速、病例数和每百万人病例数各自有独立含义。期次优先看能直接对应到数值的分句或紧邻标题。仍无明确期次时，取同句最大年份，再继承上文最近的年份标题，保留出处块号。两份真实公开公报的同键床位数分别为 1037 和 1029.8 万张，默认保留两条，指定来源后可选用一条。实验 CLI 在 `extraction-runs/` 保存逐批响应、判废和入库记录，网页抽取返回汇总。[多源复核](backend/data/deliverables/source/fusion-real.json) · [解析与抽取函数索引](docs/开发规格.md#解析与抽取函数)
 
 ## 部署到 Linux 服务器
 
@@ -212,7 +214,7 @@ sudo journalctl -u a23 -n 50
 
 若服务使用自定义数据目录，传入同一个 `--data-dir`，例如 `--data-dir /var/lib/a23`。正式验收使用 `--basis reference` 和独立的正式判据，判据结构见下节。命令核对同一目录的数据库、输入摘要、工作簿和本次报告。请在复验脚本生成报告后运行验收命令。
 
-已验证原始样本的块数、行数、分母和逐格原文一致性。相对正式参考表的准确率及正式同库与重建库验收等参考表补齐后记录。[第四周任务](六周任务/第四周任务.md) · [第六周任务](六周任务/第六周任务.md)
+正式参考表默认检查固定行数及表头顺序。01 必须有 100 个城市的五列有效值，03 核对应填与应空分母。合成 API 评分需显式设置 `A23_SYNTHETIC_REFERENCE=1`，合成 CLI 评分需加 `--synthetic`。已有本次验收产物时，可用 `check_fill.py --score-existing` 加评分，保留填写批次。正式参考表成绩在材料到位后记录。[第四周任务](六周任务/第四周任务.md) · [第六周任务](六周任务/第六周任务.md)
 
 ## 六周交接
 
@@ -252,9 +254,9 @@ sudo journalctl -u a23 -n 50
 5. 安装前端并构建。`(cd frontend && npm ci && npm run build)`
 6. 准备原文、模板和参考表。`.venv/bin/python backend/demo.py --inputs-only`
 7. 从命令行建库并填表。`.venv/bin/python backend/demo.py`。它对 01 使用固定模型替身并抽取入库，对 03 直接导入。若要演示 03 空库上传，可跳过此步。
-8. 启动。`A23_DOC_DIR="$A23_DATA_DIR/demo/doc" A23_REFERENCE_DIR="$A23_DATA_DIR/demo/doc" A23_DATA_DIR="$A23_DATA_DIR/demo/data" .venv/bin/python -m uvicorn main:app --app-dir backend --port 8000`
+8. 启动。`A23_DOC_DIR="$A23_DATA_DIR/demo/doc" A23_REFERENCE_DIR="$A23_DATA_DIR/demo/doc" A23_SYNTHETIC_REFERENCE=1 A23_DATA_DIR="$A23_DATA_DIR/demo/data" .venv/bin/python -m uvicorn main:app --app-dir backend --port 8000`
 9. 打开工作台。`http://127.0.0.1:8000`。在页面选择 01，上传 `$A23_DATA_DIR/demo/doc/合成城市报告.docx`，将模板名填为 `模板_合成城市.xlsx`，点「一键演示（已有库）」。期望 1 行、5 格、两个率均为 100%，填写耗时单列。选择 03 后上传同目录的 `合成逐日统计.xlsx`，模板名填 `模板_合成逐日.xlsx`，点「从上传开始」，期望 3 行、19 格、2 格应空。
-10. 在第二个终端跑验收。`.venv/bin/python backend/verify.py`。依次检查 pytest、交付文件、合成同库、合成空库和临时破坏性测试。公开数据两种模式的命令见「接入测试集」。
+10. 在第二个终端跑验收。`.venv/bin/python backend/verify.py`。先检查前端构建，再验证首页及实际静态资源、交付文件、合成双模式和临时破坏性测试。公开数据两种模式的命令见「接入测试集」。
 
 ### 已知局限
 
@@ -268,7 +270,7 @@ sudo journalctl -u a23 -n 50
 
 ### 哪些数不能逐位
 
-同库使用 `same-db` 的逐位值。空库重抽使用 `rebuilt`，只允许 01 四项模型相关指标使用区间。两个独立历史实验都保留了 400 条城市事实，四项指标的两端相同，因此目前是单点区间。超出区间按配置失败并查日志。03 的行数、分母和指标仍逐位。耗时和抽取条数仅供记录。
+同库使用 `same-db` 的逐位值。空库重建使用 `rebuilt`，只允许 01 四项模型相关指标使用区间。两个历史实验各保留 400 条城市事实，归档摘要和对应评分支撑当前单点区间。区间内的差异保留在报告，超出区间报错。03 的行数、分母和指标仍逐位。耗时和抽取条数仅供记录。
 
 ### 出问题先看三处
 
@@ -285,3 +287,5 @@ sudo journalctl -u a23 -n 50
 | 公开 03 F3 | 应空，Algeria 当天的每日检测数缺值 | 疫情源 XLSX 第 498 块，`Data!499`，按行和「每日检测数」表头可核查原格为空 |
 
 公开 01 的两个率原文核对均为 100%。同库两次填写耗时约 0.01 秒，03 约 0.6 秒。完整测试覆盖改坏评分和恢复，交叉验收本轮采用单人替代路径。[终端记录](backend/data/deliverables/acceptance-failures.txt) · [表 A/B/C](docs/六周验收记录.md#交叉验收)
+
+后续整改的在线空库重抽、TXT 复测及审计条目对照另有记录。[双轨审计补全记录](docs/双轨审计补全记录.md)

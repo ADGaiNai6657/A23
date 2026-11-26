@@ -12,12 +12,15 @@ from uuid import uuid4
 
 from openpyxl import load_workbook
 
+from criteria import checked_rules, load_expectations
+from extractor import CITY_TITLE, evidence_error, period_for, periods
 from fill_spec import (
-    CITY_COLUMNS, CITY_HEADERS, CITY_OUTPUT, COUNTRY_KEYS, COVID_END, COVID_OUTPUT,
+    CITY_COLUMNS, CITY_DOCUMENTS, CITY_HEADERS, CITY_OUTPUT, COUNTRY_KEYS, COVID_END, COVID_OUTPUT,
     COVID_START, DAILY_METRIC_KEYS, DATE_KEYS, CityColumn, choose_value, metric_key,
     normalize, number, spreadsheet_key,
 )
 from parser_xlsx import workbook_rows
+from schema import Block, RawFact
 from store import Store
 
 
@@ -78,7 +81,7 @@ def resolve_facts(
 ) -> dict:
     candidates = [
         fact for fact in facts
-        if fact["entity"] == entity and fact["metric_key"] == metric_key(indicator)
+        if fact["entity"] == entity and metric_key(fact["metric"]) == metric_key(indicator)
         and fact["period"] == period and fact["scope"] == scope
     ]
     comparable = [
@@ -104,7 +107,7 @@ def city_value(fact: dict, column: CityColumn):
     if (unit and unit not in units) or (suffix and suffix not in units):
         return None
     value = number(raw[1])
-    if not unit and not suffix and value is not None:
+    if value is not None:
         digits = re.sub(r"[\s,，]", "", raw[1])
         quote = re.sub(r"[\s,，]", "", fact["snippet"])
         observed = re.search(
@@ -117,10 +120,36 @@ def city_value(fact: dict, column: CityColumn):
     return parsed if parsed is not None and parsed == value else value
 
 
-def city_rows(blocks: list[dict], facts: list[dict]) -> list[list[dict]]:
+def city_fact_evidence(fact: dict) -> dict:
+    return {key: fact[key] for key in ("doc", "block_no", "metric", "value", "unit", "snippet",
+                                      "period", "period_block_no", "mode", "scope")}
+
+
+def annual_scope(scope: str, period: str) -> str:
+    label = normalize(scope)
+    if label in {"", "全年", "年度", period, f"{period}年", f"{period}年度", f"{period}年全年"}:
+        return ""
+    return label
+
+
+def city_rows(blocks: list[dict], facts: list[dict], target_period: str | None = None) -> list[list[dict]]:
     by_block = defaultdict(list)
+    parsed = [(block["number"], Block.model_validate(block)) for block in blocks]
+    context = periods(parsed)
+    parsed_by_number = dict(parsed)
+    title_year = next((match[1] for _, block in parsed[:1] if (match := CITY_TITLE.match(block.text))), None)
+    if target_period and title_year and target_period != title_year:
+        raise ValueError(f"01 目标期次 {target_period} 与原文标题 {title_year} 不一致")
+    target_period = target_period or title_year
     for fact in facts:
-        by_block[fact["block_no"]].append(fact)
+        index = fact["block_no"]
+        raw = RawFact.model_validate(fact)
+        if evidence_error(raw, parsed_by_number):
+            continue
+        period, anchor = period_for(raw, parsed_by_number[index], context[index])
+        by_block[index].append({**fact, "period": period or fact["period"],
+                                "period_block_no": anchor if period else fact["period_block_no"],
+                                "metric_key": metric_key(fact["metric"])})
     target_keys = {column.key for column in CITY_COLUMNS}
     rows = []
     for block in blocks:
@@ -146,28 +175,39 @@ def city_rows(blocks: list[dict], facts: list[dict]) -> list[list[dict]]:
         city = match[1]
         source = source_for(block)
         values = [cell(city, "城市正文段首", source)]
+        city_facts = [fact for fact in by_block[index] if fact["metric_key"] in target_keys
+                      and fact["entity"].removesuffix("市") == city.removesuffix("市")]
+        known_periods = {fact["period"] for fact in city_facts if fact["period"]}
+        period_ambiguous = target_period is None and len(known_periods) > 1
+        selected_period = target_period or (next(iter(known_periods)) if len(known_periods) == 1 else "")
         for column in CITY_COLUMNS:
-            matching = [
-                fact for fact in by_block[index] if fact["metric_key"] == column.key
-                and fact["entity"].removesuffix("市") == city.removesuffix("市")
+            matching = [fact for fact in city_facts if fact["metric_key"] == column.key]
+            comparable = [
+                fact for fact in matching
+                if not period_ambiguous and (fact["period"] == selected_period or (not target_period and not fact["period"]))
+                and not annual_scope(fact["scope"], selected_period)
             ]
             candidates = [
                 {"value": value, "fact": fact}
-                for fact in matching if (value := city_value(fact, column)) is not None
+                for fact in comparable if (value := city_value(fact, column)) is not None
             ]
             chosen, reason = choose_value(candidates)
             if chosen:
-                values.append(cell(chosen["value"], reason, source))
+                values.append({**cell(chosen["value"], reason, source), "fact": city_fact_evidence(chosen["fact"])})
             elif candidates:
                 item = cell(None, reason, source, "conflict")
                 item["conflicts"] = [
-                    {"value": candidate["value"], "snippet": candidate["fact"]["snippet"]}
+                    {"value": candidate["value"], "fact": city_fact_evidence(candidate["fact"]), "source": source}
                     for candidate in candidates
                 ]
                 values.append(item)
-            elif matching:
+            elif comparable:
                 values.append(cell(None, "抽到同城同指标事实，但数值或单位与模板列不符", source,
                                    "incompatible_value"))
+            elif matching:
+                values.append({**cell(None, "缺少可确认的目标期次或全年口径事实", source, "period_or_scope"),
+                               "conflicts": [{"value": fact["value"], "fact": city_fact_evidence(fact),
+                                              "source": source} for fact in matching]})
             else:
                 values.append(cell(None, "没有抽到来源段中的同城同指标事实", source, "missing_fact"))
         rows.append(values)
@@ -256,6 +296,7 @@ def covid_value(key: str, value: object) -> object:
 
 def fill_workbook(
     store: Store, doc: str, template: Path, output_dir: Path, source_sha256: str | None = None,
+    *, target_period: str | None = None, formal_city: bool = False,
 ) -> dict:
     started = perf_counter()
     city = doc.lower().endswith(".docx")
@@ -276,7 +317,12 @@ def fill_workbook(
                 raise ValueError("01 模板表头与字段映射不一致")
             if not facts:
                 raise ValueError("城市报告缺少可用事实，请先重新抽取事实")
-            rows = city_rows(blocks, facts)
+            rows = city_rows(blocks, facts, target_period)
+            if formal_city or doc in CITY_DOCUMENTS:
+                expected_rows = checked_rules(load_expectations(), "same-db")["01"]["rows"]
+                names = {row[0]["value"].removesuffix("市") for row in rows}
+                if len(rows) != expected_rows or len(names) != expected_rows:
+                    raise ValueError(f"01 正式输出应覆盖 {expected_rows} 个不同城市，实际 {len(rows)} 行、{len(names)} 个城市")
             filename, report_name = CITY_OUTPUT, "fill_report.json"
         elif doc.lower().endswith(".xlsx"):
             if len(headers) == 6 and not any(normalize(value) in DATE_KEYS for value in headers):
@@ -320,12 +366,20 @@ def fill_workbook(
         written_workbook = BytesIO()
         workbook.save(written_workbook)
         content = written_workbook.getvalue()
+        previous = output.read_bytes() if output.is_file() else None
         atomic_file(output, lambda target: target.write_bytes(content))
         seconds = round(perf_counter() - started, 4)
-        write_json(output_dir / report_name, {
-            **trace, "result_id": result_id, "run_id": uuid4().hex,
-            "workbook_sha256": sha256(content).hexdigest(), "fill_seconds": seconds,
-        })
+        try:
+            write_json(output_dir / report_name, {
+                **trace, "result_id": result_id, "run_id": uuid4().hex,
+                "workbook_sha256": sha256(content).hexdigest(), "fill_seconds": seconds,
+            })
+        except (OSError, ValueError, TypeError):
+            if previous is None:
+                output.unlink(missing_ok=True)
+            else:
+                atomic_file(output, lambda target: target.write_bytes(previous))
+            raise
     finally:
         workbook.close()
     return {**result, "result_id": result_id, "fill_seconds": seconds}

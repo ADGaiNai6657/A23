@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sqlite3
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -100,6 +101,33 @@ class Store:
     def facts(self, doc: str | None = None) -> list[dict]:
         with self.connect() as db:
             return self._facts(db, doc)
+
+    def record_fact_decision(self, criteria: dict, decide: Callable[[list[dict]], dict]) -> dict:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS fact_decisions (
+                    id INTEGER PRIMARY KEY, payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            digests = {row["name"]: row["digest"].rsplit(":", 1)[-1]
+                       for row in db.execute("SELECT name, digest FROM documents")}
+            candidates = [{**fact, "source_sha256": digests[fact["doc"]]} for fact in self._facts(db, None)]
+            payload = {"criteria": criteria, **decide(candidates)}
+            saved = db.execute("INSERT INTO fact_decisions(payload) VALUES (?)",
+                               (json.dumps(payload, ensure_ascii=False),))
+            return {"decision_id": saved.lastrowid, **payload}
+
+    def fact_decision(self, decision_id: int) -> dict | None:
+        if not self.path.is_file():
+            return None
+        with self.connect() as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fact_decisions'").fetchone()
+            if exists is None:
+                return None
+            row = db.execute("SELECT payload, created_at FROM fact_decisions WHERE id = ?", (decision_id,)).fetchone()
+            return {"decision_id": decision_id, "created_at": row["created_at"], **json.loads(row["payload"])} if row else None
 
     @staticmethod
     def _facts(db, doc: str | None) -> list[dict]:

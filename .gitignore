@@ -6,6 +6,7 @@ dist/
 backend/data/*.db*
 backend/data/demo/
 backend/data/actual/
+/backend/check.py
 dataset/测试集/
 .pytest_cache/
 .DS_Store

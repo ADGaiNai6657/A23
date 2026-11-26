@@ -10,6 +10,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.utils.datetime import from_excel
 
+from criteria import checked_rules, load_expectations
 from fill_spec import CITY_HEADERS, DATE_KEYS, REPORT_FILES, normalize
 from filler import write_json
 
@@ -39,11 +40,13 @@ def excel_day(value: object, epoch: datetime) -> object:
     return value.date() if isinstance(value, datetime) else value
 
 
-def scoring_origin(filled: Path, content: bytes) -> dict:
+def scoring_origin(filled: Path, content: bytes, doc: str) -> dict:
     filenames = REPORT_FILES.get(filled.name)
     if filenames is None:
         return {}
     trace = json.loads(filled.with_name(filenames[0]).read_text(encoding="utf-8"))
+    if trace.get("doc") != doc:
+        raise ValueError("当前填写工作簿属于另一份原文")
     if trace.get("workbook_sha256") != sha256(content).hexdigest() or not trace.get("result_id"):
         raise ValueError("工作簿与本次逐格结果版本不一致，请重新填写后评分")
     return {
@@ -60,7 +63,7 @@ def evaluate(
     database: Path | None = None,
 ) -> dict:
     filled_content = filled.read_bytes()
-    identity = scoring_origin(filled, filled_content)
+    identity = scoring_origin(filled, filled_content, doc)
     reference_content = reference.read_bytes()
     result_book = load_workbook(BytesIO(filled_content), read_only=True, data_only=True)
     try:
@@ -77,6 +80,12 @@ def evaluate(
             if actual.max_column != width or actual.max_row != count + 1:
                 raise ValueError("填写结果的行列数与验收范围不符")
             columns = next(actual.iter_rows(max_row=1, values_only=True))
+            reference_columns = next(expected.iter_rows(max_row=1, values_only=True))
+            header_keys = tuple(normalize(str(title or "")) for title in columns)
+            if header_keys != tuple(normalize(str(title or "")) for title in reference_columns):
+                raise ValueError("参考结果列名或列顺序与填写工作簿不一致")
+            if not covid and header_keys != tuple(map(normalize, CITY_HEADERS)):
+                raise ValueError("01 参考结果表头与五列字段定义不一致")
             date_columns = {
                 column for column, title in enumerate(columns, 1)
                 if covid and normalize(str(title)) in DATE_KEYS
@@ -84,12 +93,25 @@ def evaluate(
             actual_rows = actual.iter_rows(min_row=2, max_row=count + 1, max_col=width, values_only=True)
             expected_rows_iter = expected.iter_rows(min_row=2, max_row=count + 1, max_col=width, values_only=True)
             differences = []
+            city_names = set()
             correct = complete = allowed_empty = false_fills = missed = same_city = written = wrong = 0
             pairs = zip_longest(actual_rows, expected_rows_iter, fillvalue=(None,) * width)
             for row, (seen, target) in enumerate(pairs, 2):
                 complete += all(value is not None for value in seen)
                 same_city += matches(seen[0], target[0])
                 for column, (value, truth) in enumerate(zip(seen, target), 1):
+                    if not covid:
+                        valid = (
+                            isinstance(truth, str) and bool(truth.strip()) if column == 1
+                            else isinstance(truth, Real) and not isinstance(truth, bool) and math.isfinite(truth)
+                        )
+                        if not valid:
+                            raise ValueError(f"01 参考结果第 {row} 行第 {column} 列缺少有效应填值")
+                        if column == 1:
+                            city_name = normalize(truth).removesuffix("市")
+                            if city_name in city_names:
+                                raise ValueError(f"01 参考结果第 {row} 行重复出现城市 {truth}")
+                            city_names.add(city_name)
                     if column in date_columns:
                         value = excel_day(value, result_book.epoch)
                         truth = excel_day(truth, reference_book.epoch)
@@ -120,6 +142,10 @@ def evaluate(
                 output["database_sha256"] = sha256(database.read_bytes()).hexdigest()
             if covid:
                 required = total - allowed_empty
+                if expected_rows is not None:
+                    rules = checked_rules(load_expectations(), "same-db")["03"]
+                    if (required, allowed_empty) != (rules["required"], rules["expected_empty"]):
+                        raise ValueError("03 正式参考结果的应填、应空格数与判据不一致")
                 output.update({
                     "required": required, "expected_empty": allowed_empty, "correct": correct,
                     "false_fills": false_fills, "missed": missed,

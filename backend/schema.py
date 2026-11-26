@@ -43,6 +43,15 @@ class FillRequest(BaseModel):
     doc: str
     template: str
     source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    target_period: str | None = Field(default=None, pattern=r"^(?:19|20)\d{2}$")
+
+
+class FactDecisionRequest(BaseModel):
+    entity: str = Field(min_length=1)
+    metric: str = Field(min_length=1)
+    period: str = ""
+    scope: str = ""
+    preferred_doc: str | None = None
 
 
 Mode = Literal["general", "list"]
