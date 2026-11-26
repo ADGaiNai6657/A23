@@ -7,7 +7,7 @@ from openpyxl import Workbook
 from config import DATA
 from evaluate import evaluate
 from extractor import extract_document
-from fill_spec import CITY_HEADERS, CITY_OUTPUT, COVID_OUTPUT
+from fill_spec import CITY_HEADERS, CITY_OUTPUT, COVID_OUTPUT, REFERENCE_FILES
 from filler import fill_workbook
 from parsers import parse_document
 from store import Store
@@ -45,43 +45,57 @@ def demo_response(_prompt: str) -> dict:
     ]}
 
 
-def build_demo(root: Path) -> tuple[Path, Path, dict, dict]:
-    inputs, outputs = root / "doc", root / "data"
+def prepare_demo_inputs(inputs: Path) -> None:
     inputs.mkdir(parents=True, exist_ok=True)
-    outputs.mkdir(parents=True, exist_ok=True)
-    store = Store(outputs / "a23.db")
-
     document = Document()
     document.add_paragraph(CITY_SENTENCE)
-    city_path = inputs / CITY_DOC
-    document.save(city_path)
-    extract_document(city_path.read_bytes(), CITY_DOC, [], store, demo_response)
+    document.save(inputs / CITY_DOC)
     make_workbook(inputs / CITY_TEMPLATE, CITY_HEADERS)
-    city_reference = inputs / "参考_合成城市.xlsx"
-    make_workbook(city_reference, CITY_HEADERS, [("甲城", 100, 20, 50000, 10)])
-    fill_workbook(store, CITY_DOC, inputs / CITY_TEMPLATE, outputs)
-    city = evaluate(
-        outputs / CITY_OUTPUT, city_reference, outputs / "eval_report.json", CITY_DOC, False,
-        block_count=len(store.blocks(CITY_DOC)),
-    )
-
-    daily_path = inputs / DAILY_DOC
-    make_workbook(daily_path, SOURCE_HEADERS, (*DAILY_ROWS, (date(2020, 6, 30), "Alpha", 99, 9, 99, 9, 100)))
-    source = daily_path.read_bytes()
-    store.save(parse_document(source, DAILY_DOC), source)
+    make_workbook(inputs / REFERENCE_FILES[CITY_OUTPUT], CITY_HEADERS, [("甲城", 100, 20, 50000, 10)])
+    make_workbook(inputs / DAILY_DOC, SOURCE_HEADERS, (*DAILY_ROWS, (date(2020, 6, 30), "Alpha", 99, 9, 99, 9, 100)))
     make_workbook(inputs / DAILY_TEMPLATE, SOURCE_HEADERS)
-    daily_reference = inputs / "参考_合成逐日.xlsx"
-    make_workbook(daily_reference, SOURCE_HEADERS, sorted(DAILY_ROWS))
-    fill_workbook(store, DAILY_DOC, inputs / DAILY_TEMPLATE, outputs)
-    daily = evaluate(
-        outputs / COVID_OUTPUT, daily_reference, outputs / "eval_report_covid19.json", DAILY_DOC, True,
-        block_count=len(store.blocks(DAILY_DOC)),
-    )
+    make_workbook(inputs / REFERENCE_FILES[COVID_OUTPUT], SOURCE_HEADERS, sorted(DAILY_ROWS))
+
+
+def fill_demo(inputs: Path, outputs: Path) -> tuple[dict, dict]:
+    store = Store(outputs / "a23.db")
+    reports = []
+    for doc, template, file, report in (
+        (CITY_DOC, CITY_TEMPLATE, CITY_OUTPUT, "eval_report.json"),
+        (DAILY_DOC, DAILY_TEMPLATE, COVID_OUTPUT, "eval_report_covid19.json"),
+    ):
+        fill_workbook(store, doc, inputs / template, outputs)
+        reports.append(evaluate(
+            outputs / file, inputs / REFERENCE_FILES[file], outputs / report, doc, file == COVID_OUTPUT,
+            block_count=len(store.blocks(doc)), database=store.path,
+        ))
+    return reports[0], reports[1]
+
+
+def build_demo(root: Path) -> tuple[Path, Path, dict, dict]:
+    inputs, outputs = root / "doc", root / "data"
+    prepare_demo_inputs(inputs)
+    outputs.mkdir(parents=True, exist_ok=True)
+    store = Store(outputs / "a23.db")
+    extract_document((inputs / CITY_DOC).read_bytes(), CITY_DOC, [], store, demo_response)
+    source = (inputs / DAILY_DOC).read_bytes()
+    store.save(parse_document(source, DAILY_DOC), source)
+    city, daily = fill_demo(inputs, outputs)
     return inputs, outputs, city, daily
 
 
 if __name__ == "__main__":
-    inputs, outputs, city, daily = build_demo(DATA / "demo")
-    print(f"合成样例：{inputs}")
-    print(f"生成结果：{outputs}")
-    print(f"01 准确率 {city['cell_accuracy']}，03 对格率 {daily['correct_rate']}")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="准备无模型调用的合成演示")
+    parser.add_argument("--inputs-only", action="store_true", help="只写原文、模板和参考表，供 03 空库演示")
+    args = parser.parse_args()
+    root = DATA / "demo"
+    if args.inputs_only:
+        prepare_demo_inputs(root / "doc")
+        print(f"合成样例：{root / 'doc'}")
+    else:
+        inputs, outputs, city, daily = build_demo(root)
+        print(f"合成样例：{inputs}")
+        print(f"生成结果：{outputs}")
+        print(f"01 准确率 {city['cell_accuracy']}，03 对格率 {daily['correct_rate']}")

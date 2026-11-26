@@ -1,7 +1,9 @@
 import json
+import os
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from docx import Document
@@ -10,19 +12,22 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils.datetime import to_excel
 
 import main
-from acceptance import check, checked_rules
-from check_extract import export_facts
-from demo import CITY_DOC, CITY_TEMPLATE, DAILY_DOC, DAILY_TEMPLATE, build_demo, make_workbook
+from acceptance import DEMO_DELIVERY, check, checked_outputs
+from check_extract import compare_runs, export_facts, replay_run
+from criteria import checked_rules, load_expectations
+from demo import CITY_DOC, CITY_TEMPLATE, DAILY_DOC, DAILY_TEMPLATE, build_demo, demo_response, make_workbook, prepare_demo_inputs
 from evaluate import evaluate
-from extractor import extract_document
-from fill_spec import CITY_COLUMNS, CITY_OUTPUT, COVID_OUTPUT
+from config import ROOT
+from extractor import evidence_error, extract_document
+from fill_spec import CITY_COLUMNS, CITY_OUTPUT, COVID_OUTPUT, REFERENCE_FILES, REPORT_FILES
 from filler import city_value, fill_workbook, resolve_facts, write_json
 from parsers import parse_document
-from schema import Block, ParsedDoc
+from schema import Block, ParsedDoc, RawFact
 from store import Store
+from unpack_dataset import unpack_dataset
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def demo(tmp_path_factory):
     return build_demo(tmp_path_factory.mktemp("a23-demo"))
 
@@ -33,6 +38,8 @@ def client(monkeypatch, demo):
     monkeypatch.setattr(main, "INPUTS", inputs)
     monkeypatch.setattr(main, "DATA", outputs)
     monkeypatch.setattr(main, "store", Store(outputs / "a23.db"))
+    monkeypatch.setattr(main, "REFERENCE_DIR", None)
+    monkeypatch.setattr(main, "SOURCE_CHECK_ROOT", None)
     return TestClient(main.app)
 
 
@@ -75,11 +82,23 @@ def test_xlsx_stream_rows_keep_headers():
     assert "数量: 0" in parsed.blocks[0].text
 
 
-@pytest.mark.parametrize("path,name", [("/parse", "坏.docx"), ("/extract", "无.csv")])
+@pytest.mark.parametrize("path,name", [
+    ("/parse", "坏.docx"), ("/extract", "无.csv"), ("/extract", "坏.xlsx"), ("/extract", "坏.docx"),
+])
 def test_bad_uploads(client, path, name):
     response = client.post(path, files={"file": (name, b"not an office file")})
     assert response.status_code == 400
     assert isinstance(response.json()["detail"], str)
+
+
+def test_text_decoding_exceptions_and_empty_extract(client):
+    for path in ("/parse", "/ingest", "/extract"):
+        response = client.post(path, files={"file": ("bad.txt", "无法解码".encode("gbk"))})
+        assert response.status_code == 400 and "无法读取 .txt" in response.json()["detail"]
+    assert client.post("/extract", files={"file": ("空.txt", b"\n ")}).status_code == 400
+    assert client.post("/extract").status_code == 422
+    result = client.post("/parse", files={"file": ("bom.txt", "测试".encode("utf-8-sig"))})
+    assert result.json()["blocks"][0]["text"] == "测试"
 
 
 @pytest.mark.parametrize("extension", ["txt", "md"])
@@ -292,7 +311,7 @@ def test_wrong_refusal_and_missing_cell_are_distinct(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DATA", outputs)
     monkeypatch.setattr(main, "store", Store(outputs / "a23.db"))
     client = TestClient(main.app)
-    reference = inputs / "参考_合成城市.xlsx"
+    reference = inputs / REFERENCE_FILES[CITY_OUTPUT]
     workbook = load_workbook(reference)
     workbook.active["B2"] = 999
     workbook.save(reference)
@@ -313,7 +332,7 @@ def test_wrong_refusal_and_missing_cell_are_distinct(tmp_path, monkeypatch):
 
 def test_reference_excel_serial_is_compared_in_the_date_column(tmp_path):
     inputs, outputs, _, _ = build_demo(tmp_path)
-    reference = inputs / "参考_合成逐日.xlsx"
+    reference = inputs / REFERENCE_FILES[COVID_OUTPUT]
     workbook = load_workbook(reference)
     value = workbook.active["A2"].value
     workbook.active["A2"] = to_excel(value, workbook.epoch)
@@ -325,19 +344,22 @@ def test_reference_excel_serial_is_compared_in_the_date_column(tmp_path):
 
 
 def test_formal_rules_refuse_partial_and_unbounded_fixed_counts():
-    city = {"block_count": 113, "rows": [1, 100], "city_order_matches": 100, "cells_written": 500,
-            "cells_empty": 0, "cell_accuracy": 1, "row_completeness": 1}
-    daily = {"block_count": 15088, "rows": 2542, "required": 17464, "expected_empty": 330,
-             "cells_written": 17464, "cells_empty": 330, "correct": 17464, "false_fills": 0,
-             "missed": 0, "correct_rate": 1, "false_fill_rate": 0, "missed_rate": 0}
+    config = load_expectations()
     with pytest.raises(ValueError, match="同时包含"):
-        checked_rules({"rebuilt": {"01": city}}, "rebuilt")
-    with pytest.raises(ValueError, match=r"01.rows 必须精确"):
-        checked_rules({"rebuilt": {"01": city, "03": daily}}, "rebuilt")
-    city["rows"] = 100
-    city["cell_accuracy"] = [0.0, 1.0]
+        checked_rules({**config, "same-db": {"01": config["same-db"]["01"]}}, "rebuilt")
+    exact = config["same-db"]["01"]
+    count = exact["rows"]
+    exact["rows"] = [1, count]
+    with pytest.raises(ValueError, match=r"01.rows 必须使用精确"):
+        checked_rules(config, "rebuilt")
+    exact["rows"] = count
+    config["rebuilt"]["01"]["cell_accuracy"] = [0.0, 1.0]
     with pytest.raises(ValueError, match="两个独立重抽"):
-        checked_rules({"rebuilt": {"01": city, "03": daily}}, "rebuilt")
+        checked_rules(config, "rebuilt")
+    config = load_expectations()
+    config["observations"][1]["extraction_id"] = config["observations"][0]["extraction_id"]
+    with pytest.raises(ValueError, match="两个独立重抽"):
+        checked_rules(config, "rebuilt")
 
 
 def test_valid_extraction_survives_a_malformed_fact(tmp_path):
@@ -357,3 +379,145 @@ def test_fact_export_preserves_two_documents_with_the_same_suffix(tmp_path):
     assert first["file"] != second["file"]
     saved = json.loads((tmp_path / "facts_export_manifest.json").read_text())
     assert saved == [first, second]
+
+
+@pytest.mark.parametrize("case,key", [
+    (case, key) for case, rules in load_expectations()["demo"].items() for key in rules
+])
+def test_delivered_report_predicate(case, key):
+    directory = Path(os.getenv("A23_TEST_REPORT_DIR", str(DEMO_DELIVERY)))
+    rules = load_expectations()["demo"]
+    reports = checked_outputs(directory, "reference", require_database=False)
+    assert not (failures := check(reports, {case: {key: rules[case][key]}})), "\n".join(failures)
+
+
+def test_extraction_audit_replays_retries_and_preserves_fact_distinctions(tmp_path):
+    content = "主营业务收入总额10亿元，营业收入11亿元。".encode()
+    first = {"block_no": 1, "metric": "主营业务收入总额", "value": "10", "snippet": "主营业务收入总额10亿元"}
+    separate = {"block_no": 1, "metric": "营业收入", "value": "11", "snippet": "营业收入11亿元"}
+    replies = iter([{"facts": False}, {"facts": [first, separate, {**first, "block_no": 2}]}])
+    original = {}
+    extract_document(content, "输入.txt", ["主营业务收入"], Store(tmp_path / "original.db"),
+                     lambda _: next(replies), audit=original)
+    batch, = original["batches"]
+    assert len(batch["attempts"]) == 2 and batch["attempts"][0]["error"]
+    assert [item["rejected"] for item in batch["decisions"]] == [None, "指标不在清单内", "块号不在本批"]
+    replays = [replay_run(tmp_path / "输入.txt", content, original, Store(tmp_path / f"replay-{i}.db")) for i in range(2)]
+    comparison = compare_runs(*replays)
+    assert comparison["shared"] == 1 and not comparison["first_only"] and not comparison["second_only"]
+    assert all(run["traceable"] == 1 for run in comparison["runs"])
+
+
+def test_same_content_refill_cannot_return_prior_run_score(client, demo):
+    old = demo[2]
+    filled = client.post("/fill", json={"doc": CITY_DOC, "template": CITY_TEMPLATE})
+    assert filled.headers["X-A23-Result-ID"] == old["result_id"]
+    assert float(filled.headers["X-A23-Fill-Seconds"]) >= 0
+    assert client.get("/reports", params={"doc": CITY_DOC, "result_id": old["result_id"]}).status_code == 404
+    result = client.get("/cells", params={"doc": CITY_DOC, "file": CITY_OUTPUT, "row": 2, "column": 2}).json()
+    assert result["evaluation"] is None
+    assert client.get("/files", params={"name": CITY_OUTPUT, "result_id": old["result_id"]}).status_code == 200
+    assert client.get("/files", params={"name": CITY_OUTPUT, "result_id": "old"}).status_code == 409
+
+
+def test_daily_empty_database_upload_fill_score_download_and_evidence(tmp_path, monkeypatch):
+    inputs, outputs = tmp_path / "doc", tmp_path / "out"
+    prepare_demo_inputs(inputs)
+    store = Store(outputs / "a23.db")
+    monkeypatch.setattr(main, "DATA", outputs)
+    monkeypatch.setattr(main, "INPUTS", inputs)
+    monkeypatch.setattr(main, "REFERENCE_DIR", inputs)
+    monkeypatch.setattr(main, "store", store)
+    client = TestClient(main.app)
+    upload = {"file": (DAILY_DOC, (inputs / DAILY_DOC).read_bytes())}
+    assert not store.path.exists()
+    parsed = client.post("/parse", files=upload)
+    assert parsed.status_code == 200 and not store.path.exists()
+    assert client.post("/ingest", files=upload).status_code == 200
+    filled = client.post("/fill", json={
+        "doc": DAILY_DOC, "template": DAILY_TEMPLATE, "source_sha256": parsed.headers["X-A23-Source-SHA256"],
+    })
+    assert filled.status_code == 200
+    query = {"doc": DAILY_DOC, "file": COVID_OUTPUT, "result_id": filled.headers["X-A23-Result-ID"]}
+    report = client.get("/reports", params=query).json()
+    assert report["refusal_counts"] == {"source_blank": report["expected_empty"]}
+    assert client.get("/files", params={"name": COVID_OUTPUT, "result_id": query["result_id"]}).status_code == 200
+    detail = client.get("/cells", params={**query, "row": 3, "column": 4}).json()
+    assert detail["decision"] == "refused" and detail["reason_code"] == "source_blank"
+    assert detail["source"]["locator"] == {"sheet": "Sheet", "row": 3}
+
+
+def test_real_corpus_fusion_conflict(tmp_path):
+    data = json.loads((DEMO_DELIVERY.parent / "source" / "fusion-real.json").read_bytes())
+    corpus = tmp_path / "corpus"
+    unpack_dataset(ROOT / "dataset" / "测试集.zip", corpus)
+    store = Store(tmp_path / "a23.db")
+    entity, metric, period, scope, unit = (data[key] for key in ("entity", "metric", "period", "scope", "unit"))
+    for candidate in data["candidates"]:
+        path = corpus / candidate["path"]
+        content = path.read_bytes()
+        doc = parse_document(content, path.name)
+        blocks = dict(doc.numbered_blocks())
+        block_no, period_block_no, value, snippet = (
+            candidate[key] for key in ("block_no", "period_block_no", "value", "snippet")
+        )
+        fact = RawFact(block_no=block_no, metric=metric, value=value, snippet=snippet)
+        assert evidence_error(fact, blocks) is None and period in blocks[period_block_no].text
+        store.save(doc, content, "list", [
+            (block_no, entity, metric, metric, value, value, unit, snippet, period, period_block_no, scope),
+        ])
+    facts = store.facts()
+    evidence = resolve_facts(facts, entity, metric, period, scope)
+    assert {fact["value"] for fact in evidence["candidates"]} == {"1037", "1029.8"}
+    assert evidence["selected"] is None
+    preferred = resolve_facts(facts, entity, metric, period, scope, preferred_doc=Path(data["candidates"][1]["path"]).name)
+    assert preferred["selected"]["value"] == "1029.8" and len(preferred["candidates"]) == 2
+
+
+def test_city_refusals_explain_missing_fact_and_incompatible_unit(tmp_path):
+    inputs, output, _, _ = build_demo(tmp_path)
+    store = Store(output / "a23.db")
+    extract_document((inputs / CITY_DOC).read_bytes(), CITY_DOC, [], store, lambda _: {"facts": [
+        {"block_no": 1, "metric": "GDP总量", "entity": "甲城", "value": "100",
+         "snippet": "GDP总量100亿元", "unit": "万元"},
+    ]})
+    fill_workbook(store, CITY_DOC, inputs / CITY_TEMPLATE, output)
+    report = evaluate(output / CITY_OUTPUT, inputs / REFERENCE_FILES[CITY_OUTPUT],
+                      output / "eval_report.json", CITY_DOC, False)
+    assert report["refusal_counts"] == {"incompatible_value": 1, "missing_fact": 3}
+    assert report["missed"] == 4 and report["wrong_values"] == 0
+    trace = json.loads((output / REPORT_FILES[CITY_OUTPUT][0]).read_bytes())
+    assert all(cell["source"]["locator"] == {"paragraph": 1} for cell in trace["cells"])
+
+
+def test_city_empty_database_extract_with_model_substitute_and_fill(tmp_path, monkeypatch):
+    inputs, outputs = tmp_path / "doc", tmp_path / "out"
+    prepare_demo_inputs(inputs)
+    store = Store(outputs / "a23.db")
+    monkeypatch.setattr(main, "DATA", outputs)
+    monkeypatch.setattr(main, "INPUTS", inputs)
+    monkeypatch.setattr(main, "REFERENCE_DIR", inputs)
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(main, "extract_document", lambda data, name, metrics, target: extract_document(
+        data, name, metrics, target, demo_response,
+    ))
+    client = TestClient(main.app)
+    request = {"doc": CITY_DOC, "template": CITY_TEMPLATE}
+    assert not store.path.exists()
+    assert client.post("/fill", json=request).status_code == 400
+    upload = {"file": (CITY_DOC, (inputs / CITY_DOC).read_bytes())}
+    response = client.post("/extract", files=upload)
+    assert response.status_code == 200 and response.json()["kept"] == len(store.facts(CITY_DOC))
+    response = client.post("/fill", json=request)
+    assert response.status_code == 200
+    assert client.get("/reports", params={"doc": CITY_DOC}).json()["cell_accuracy"] == 1
+
+
+def test_score_error_does_not_hide_a_successful_fill(client, demo, monkeypatch):
+    inputs, _, _, _ = demo
+    monkeypatch.setattr(main, "REFERENCE_DIR", inputs)
+    (inputs / REFERENCE_FILES[CITY_OUTPUT]).write_bytes(b"broken reference")
+    response = client.post("/fill", json={"doc": CITY_DOC, "template": CITY_TEMPLATE})
+    assert response.status_code == 200 and response.headers["X-A23-Score-Status"] == "failed"
+    assert client.get("/files", params={"name": CITY_OUTPUT, "result_id": response.headers["X-A23-Result-ID"]}).status_code == 200
+    assert client.get("/reports", params={"doc": CITY_DOC}).status_code == 404

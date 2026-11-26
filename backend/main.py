@@ -1,7 +1,10 @@
 import json
+import logging
 from hashlib import sha256
 from pathlib import Path
+from threading import Lock
 from typing import Annotated
+from urllib.parse import quote
 from zipfile import BadZipFile
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
@@ -9,9 +12,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl.utils.exceptions import InvalidFileException
 
-from config import DATA, DIST, INPUTS
+from check_dataset import score_published_fill
+from config import DATA, DIST, INPUTS, REFERENCE_DIR, SOURCE_CHECK_ROOT
+from evaluate import evaluate
 from extractor import extract_document
-from fill_spec import CITY_OUTPUT, REPORT_FILES
+from fill_spec import CITY_OUTPUT, COVID_OUTPUT, REFERENCE_FILES, REPORT_FILES
 from filler import block_digest, fill_workbook, resolve_facts
 from parsers import leaf_name, parse_document
 from schema import ExtractResult, FillRequest, ParsedDoc
@@ -19,6 +24,10 @@ from store import Store
 
 app = FastAPI(title="A23 文档理解与数据融合")
 store = Store()
+fill_lock = Lock()
+logger = logging.getLogger(__name__)
+
+
 def find_template(name: str) -> Path:
     leaf_name(name)
     filename = Path(name)
@@ -89,8 +98,15 @@ def facts(
 def fill(request: FillRequest, response: Response) -> dict:
     try:
         doc = leaf_name(request.doc)
-        result = fill_workbook(store, doc, find_template(request.template), DATA, request.source_sha256)
+        with fill_lock:
+            result = fill_workbook(store, doc, find_template(request.template), DATA, request.source_sha256)
+            try:
+                score_filled(doc)
+            except (OSError, ValueError, BadZipFile, InvalidFileException, KeyError, StopIteration):
+                logger.exception("填写已完成，自检报告生成失败")
+                response.headers["X-A23-Score-Status"] = "failed"
         response.headers["X-A23-Result-ID"] = result.pop("result_id")
+        response.headers["X-A23-Fill-Seconds"] = str(result.pop("fill_seconds"))
         return result
     except (BadZipFile, InvalidFileException, KeyError) as error:
         raise HTTPException(400, "无法读取 XLSX 模板，请检查文件内容") from error
@@ -98,18 +114,28 @@ def fill(request: FillRequest, response: Response) -> dict:
         raise HTTPException(400, str(error)) from error
 
 
-def current_trace(doc: str, file: str, result_id: str | None) -> dict:
+def score_filled(doc: str) -> None:
+    file = CITY_OUTPUT if doc.lower().endswith(".docx") else COVID_OUTPUT
+    reference = REFERENCE_DIR / REFERENCE_FILES[file] if REFERENCE_DIR else None
+    if reference is not None and reference.is_file():
+        evaluate(DATA / file, reference, DATA / REPORT_FILES[file][1], doc, file == COVID_OUTPUT,
+                 block_count=len(store.blocks(doc)), database=store.path)
+    elif SOURCE_CHECK_ROOT:
+        score_published_fill(SOURCE_CHECK_ROOT, DATA, store, file, doc)
+
+
+def current_trace(doc: str | None, file: str, result_id: str | None, content: bytes | None = None) -> dict:
     if file not in REPORT_FILES:
         raise HTTPException(400, "未识别的结果文件")
     trace = read_report(REPORT_FILES[file][0])
-    if trace.get("doc") != doc:
+    if doc is not None and trace.get("doc") != doc:
         raise HTTPException(404, "没有这份文档的填写记录")
     if result_id and trace.get("result_id") != result_id:
         raise HTTPException(409, "填写结果已更新，请重新填写或查询")
     if not trace.get("result_id"):
         raise HTTPException(409, "旧版填写记录无法核对版本，请重新填写")
     try:
-        actual_hash = sha256((DATA / file).read_bytes()).hexdigest()
+        actual_hash = sha256((DATA / file).read_bytes() if content is None else content).hexdigest()
     except FileNotFoundError as error:
         raise HTTPException(404, "填写结果文件已缺失，请重新填写") from error
     if trace.get("workbook_sha256") != actual_hash:
@@ -121,7 +147,10 @@ def matching_score(file: str, trace: dict) -> dict | None:
     for name in REPORT_FILES[file][1:]:
         if (DATA / name).is_file():
             report = read_report(name)
-            if report.get("doc") == trace["doc"] and report.get("result_id") == trace["result_id"]:
+            if report.get("file") == file and trace.get("run_id") and all(
+                report.get(key) == trace.get(key)
+                for key in ("doc", "result_id", "run_id", "workbook_sha256", "source_sha256", "template_sha256")
+            ):
                 return report
     return None
 
@@ -167,7 +196,7 @@ def cell_detail(
 
 
 @app.get("/files")
-def files(name: str) -> FileResponse:
+def files(name: str, result_id: str | None = None) -> Response:
     try:
         leaf_name(name)
         if not name.startswith("filled_") or not name.endswith(".xlsx"):
@@ -177,6 +206,13 @@ def files(name: str) -> FileResponse:
     path = (DATA / name).resolve()
     if path.parent != DATA or not path.is_file():
         raise HTTPException(404, "结果文件不存在")
+    if result_id is not None:
+        content = path.read_bytes()
+        current_trace(None, name, result_id, content)
+        return Response(
+            content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
+        )
     return FileResponse(path, filename=name)
 
 

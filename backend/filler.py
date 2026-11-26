@@ -1,12 +1,13 @@
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from datetime import date, datetime
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import perf_counter
 from uuid import uuid4
 
 from openpyxl import load_workbook
@@ -64,10 +65,10 @@ def as_date(value: object) -> date | None:
         return None
 
 
-def cell(value: object, reason: str, source: dict | None = None) -> dict:
+def cell(value: object, reason: str, source: dict | None = None, reason_code: str | None = None) -> dict:
     return {
         "value": value, "decision": "filled" if value is not None else "refused",
-        "reason": reason, "source": source,
+        "reason": reason, "source": source, **({"reason_code": reason_code} if reason_code else {}),
     }
 
 
@@ -146,15 +147,29 @@ def city_rows(blocks: list[dict], facts: list[dict]) -> list[list[dict]]:
         source = source_for(block)
         values = [cell(city, "城市正文段首", source)]
         for column in CITY_COLUMNS:
+            matching = [
+                fact for fact in by_block[index] if fact["metric_key"] == column.key
+                and fact["entity"].removesuffix("市") == city.removesuffix("市")
+            ]
             candidates = [
                 {"value": value, "fact": fact}
-                for fact in by_block[index]
-                if fact["metric_key"] == column.key
-                and fact["entity"].removesuffix("市") == city.removesuffix("市")
-                and (value := city_value(fact, column)) is not None
+                for fact in matching if (value := city_value(fact, column)) is not None
             ]
             chosen, reason = choose_value(candidates)
-            values.append(cell(chosen["value"] if chosen else None, reason, source if chosen else None))
+            if chosen:
+                values.append(cell(chosen["value"], reason, source))
+            elif candidates:
+                item = cell(None, reason, source, "conflict")
+                item["conflicts"] = [
+                    {"value": candidate["value"], "snippet": candidate["fact"]["snippet"]}
+                    for candidate in candidates
+                ]
+                values.append(item)
+            elif matching:
+                values.append(cell(None, "抽到同城同指标事实，但数值或单位与模板列不符", source,
+                                   "incompatible_value"))
+            else:
+                values.append(cell(None, "没有抽到来源段中的同城同指标事实", source, "missing_fact"))
         rows.append(values)
     if not rows:
         raise ValueError("库里没有可用的城市正文段落")
@@ -215,11 +230,18 @@ def covid_rows(content: bytes, blocks: list[dict], headers: tuple[str, ...]) -> 
                 if (value := covid_value(key, raw)) is not None
             ]
             if not options:
-                values.append(cell(None, "匹配的来源行在该字段没有可用值", records[0][1]))
+                candidates_have_value = any(
+                    raw is not None and str(raw).strip() for record, _ in records for _, raw in record[key]
+                )
+                values.append(cell(
+                    None, "匹配的来源行在该字段没有可用值", records[0][1],
+                    "incompatible_value" if candidates_have_value else "source_blank",
+                ))
                 continue
             chosen, reason = choose_value(options)
             item = cell(chosen["value"] if chosen else None, reason, chosen["source"] if chosen else None)
             if chosen is None:
+                item["reason_code"] = "conflict"
                 item["conflicts"] = options
             values.append(item)
         result.append(values)
@@ -235,6 +257,7 @@ def covid_value(key: str, value: object) -> object:
 def fill_workbook(
     store: Store, doc: str, template: Path, output_dir: Path, source_sha256: str | None = None,
 ) -> dict:
+    started = perf_counter()
     city = doc.lower().endswith(".docx")
     snapshot = store.snapshot(doc, with_facts=city)
     if snapshot is None:
@@ -289,6 +312,7 @@ def fill_workbook(
             "doc": doc, "file": filename, **result, "cells": cells,
             "source_sha256": document_digest, "template_sha256": sha256(template_content).hexdigest(),
             "block_count": len(blocks),
+            "refusal_counts": dict(Counter(item["reason_code"] for item in cells if "reason_code" in item)),
         }
         result_id = json_digest(trace)
         output = output_dir / filename
@@ -297,10 +321,11 @@ def fill_workbook(
         workbook.save(written_workbook)
         content = written_workbook.getvalue()
         atomic_file(output, lambda target: target.write_bytes(content))
+        seconds = round(perf_counter() - started, 4)
         write_json(output_dir / report_name, {
             **trace, "result_id": result_id, "run_id": uuid4().hex,
-            "workbook_sha256": sha256(content).hexdigest(),
+            "workbook_sha256": sha256(content).hexdigest(), "fill_seconds": seconds,
         })
     finally:
         workbook.close()
-    return {**result, "result_id": result_id}
+    return {**result, "result_id": result_id, "fill_seconds": seconds}

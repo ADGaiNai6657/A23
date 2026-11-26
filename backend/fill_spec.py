@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 CITY_TEMPLATE = "模板_2025中国城市经济百强.xlsx"
 CITY_OUTPUT = "filled_2025中国城市经济百强.xlsx"
 COVID_OUTPUT = "filled_covid19_byday.xlsx"
+REFERENCE_FILES = {CITY_OUTPUT: "参考_01.xlsx", COVID_OUTPUT: "参考_03.xlsx"}
 REPORT_FILES = {
     CITY_OUTPUT: ("fill_report.json", "eval_report.json", "source_report.json"),
     COVID_OUTPUT: ("fill_report_covid19.json", "eval_report_covid19.json", "source_report_covid19.json"),
@@ -36,6 +37,7 @@ METRIC_ALIASES = {
     "budget_revenue": ("一般公共预算收入", "公共预算收入"),
     "budget_expense": ("一般公共预算支出", "公共预算支出"),
     "sales": ("销售总额", "销售额"),
+    "main_business_revenue": ("主营业务收入总额", "主营业务收入"),
     "business_revenue": ("营业收入", "营收"),
     "retail_sales": ("社会消费品零售总额", "社零总额"),
     "new_cases": ("新增确诊病例", "新增病例", "new_cases"),

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from config import DATA
+from criteria import checked_rules, load_expectations
 from evaluate import evaluate
 from fill_spec import CITY_OUTPUT, COVID_OUTPUT
 from filler import fill_workbook
@@ -24,7 +25,7 @@ def main() -> None:
     output, report = (COVID_OUTPUT, "eval_report_covid19.json") if covid else (CITY_OUTPUT, "eval_report.json")
     store = Store(args.data_dir / "a23.db")
     filled = fill_workbook(store, args.doc, args.template, args.data_dir)
-    rows = None if args.synthetic else 2542 if covid else 100
+    rows = None if args.synthetic else checked_rules(load_expectations(), "same-db")[args.scenario]["rows"]
     grading = evaluate(
         args.data_dir / output, args.reference, args.data_dir / report, args.doc, covid,
         expected_rows=rows, block_count=len(store.blocks(args.doc)), database=store.path,

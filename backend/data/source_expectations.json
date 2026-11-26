@@ -27,7 +27,6 @@
   },
   "rebuilt": {
     "01": {
-      "block_count": 113,
       "cell_accuracy": [
         1.0,
         1.0
@@ -40,48 +39,53 @@
         500,
         500
       ],
-      "city_order_matches": 100,
       "row_completeness": [
         1.0,
         1.0
-      ],
-      "rows": 100
-    },
-    "03": {
-      "block_count": 15088,
-      "cells_empty": 330,
-      "cells_written": 17464,
-      "correct": 17464,
-      "correct_rate": 1.0,
-      "expected_empty": 330,
-      "false_fill_rate": 0.0,
-      "false_fills": 0,
-      "missed": 0,
-      "missed_rate": 0.0,
-      "required": 17464,
-      "rows": 2542
+      ]
     }
   },
   "observations": [
     {
       "run_id": "749b9c3e89c9491c83a32fd64a878796",
-      "basis": "原始事实库的独立抽取，隔离目录同库复验",
+      "basis": "历史独立抽取 A，后来在 repair_same 隔离副本复验",
       "01": {
         "cell_accuracy": 1.0,
         "cells_empty": 0,
         "cells_written": 500,
         "row_completeness": 1.0
-      }
+      },
+      "extraction_id": "city-original-historical"
     },
     {
       "run_id": "1e5e4d27cc33455cb42ca6601d3a091c",
-      "basis": "本轮空库重新抽取，再独立核对原文",
+      "basis": "历史空库独立抽取 B，后来在 repair_rebuilt 隔离副本复验",
       "01": {
         "cell_accuracy": 1.0,
         "cells_empty": 0,
         "cells_written": 500,
         "row_completeness": 1.0
-      }
+      },
+      "extraction_id": "city-rebuilt-historical"
     }
-  ]
+  ],
+  "demo": {
+    "01": {
+      "block_count": 1,
+      "rows": 1,
+      "cells_written": 5,
+      "cells_empty": 0,
+      "cell_accuracy": 1,
+      "row_completeness": 1,
+      "city_order_matches": 1
+    },
+    "03": {
+      "rows": 3,
+      "required": 19,
+      "expected_empty": 2,
+      "correct": 19,
+      "false_fills": 0,
+      "missed": 0
+    }
+  }
 }

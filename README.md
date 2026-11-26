@@ -2,6 +2,16 @@
 
 第十七届服创大赛 A23 六周挑战档训练项目。支持 TXT、Markdown、DOCX 和 XLSX 的解析与事实抽取，以及 01 城市经济、03 历史疫情两套 Excel 模板的填写、评估和逐格溯源。[开发规格](docs/开发规格.md)
 
+## 项目目录
+
+| 路径 | 内容 |
+| --- | --- |
+| `backend/` | FastAPI、文档解析、抽取、SQLite、填写、评分和验收脚本 |
+| `backend/data/` | 默认运行数据目录、数值判据及 `deliverables/` 验收产物 |
+| `frontend/` | Vue 源码、npm 锁文件及本地构建目录 |
+| `dataset/` | 公开测试集压缩包 |
+| `六周任务/`、`docs/` | 原始要求、实现规格、当前验收结果和交接记录 |
+
 ## 本地运行
 
 需要 Python 3.14、Node.js `^22.18.0 || >=24.12.0` 和 npm。前端用 Vite 构建，由 FastAPI 在同一地址提供页面和接口。
@@ -15,8 +25,7 @@ git clone https://github.com/ADGaiNai6657/A23.git
 cd A23
 python3.14 -m venv .venv
 .venv/bin/python -m pip install -r backend/requirements.txt
-npm --prefix frontend ci
-npm --prefix frontend run build
+(cd frontend && npm ci && npm run build)
 (cd backend && ../.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000)
 ```
 
@@ -27,13 +36,15 @@ npm --prefix frontend run build
 ```powershell
 py -3.14 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
-npm.cmd --prefix frontend ci
-npm.cmd --prefix frontend run build
+Push-Location frontend
+npm.cmd ci
+npm.cmd run build
+Pop-Location
 Set-Location backend
 ..\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-启动后打开 [应用首页](http://127.0.0.1:8000/)、[接口文档](http://127.0.0.1:8000/docs) 或 [健康检查](http://127.0.0.1:8000/health)。健康检查应返回 `{"ok":true}`。前端改动后重新构建并重启服务。若首页提示前端尚未构建，先检查 `frontend/dist/index.html`。macOS Apple Silicon 和 Debian Linux ARM64 已实测，Windows 命令尚待实机验证。
+启动后打开 [应用首页](http://127.0.0.1:8000/)、[接口文档](http://127.0.0.1:8000/docs) 或 [健康检查](http://127.0.0.1:8000/health)。健康检查应返回 `{"ok":true}`。前端改动后重新构建并刷新。若首页提示前端尚未构建，先检查 `frontend/dist/index.html`。本轮复验在 macOS Apple Silicon；历史部署记录含 Debian Linux ARM64，Windows 命令仍待实机验证。
 
 ### 配置 DeepSeek API 密钥
 
@@ -51,7 +62,7 @@ DEEPSEEK_API_KEY=你的实际密钥
 
 ```sh
 .venv/bin/python backend/demo.py
-(cd backend && A23_DOC_DIR=data/demo/doc A23_DATA_DIR=data/demo/data \
+(cd backend && A23_DOC_DIR=data/demo/doc A23_DATA_DIR=data/demo/data A23_REFERENCE_DIR=data/demo/doc \
   ../.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000)
 ```
 
@@ -62,10 +73,11 @@ Windows PowerShell 在项目根目录打开新终端，执行以下命令。
 Set-Location backend
 $env:A23_DOC_DIR = "$PWD\data\demo\doc"
 $env:A23_DATA_DIR = "$PWD\data\demo\data"
+$env:A23_REFERENCE_DIR = "$PWD\data\demo\doc"
 ..\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-打开首页，在「填写与验收」选中模板类型并录入表中的文件名，然后点「开始填写」。合成样例已经预填事实库和自检报告，可以直接下载结果或用 Excel 行号和列号追溯来源。
+打开首页，在「填写与验收」选中模板类型并录入表中的文件名，然后点「开始填写」。合成样例已经预填事实库和自检报告。配置的合成参考表会给本次填写重新评分。可以上传同名原文并点「一键演示（已有库）」，然后下载 Excel 或按行列号追溯。
 
 | 模板 | 库里的文档名 | 模板文件名 | 可核对的结果 |
 | --- | --- | --- | --- |
@@ -79,33 +91,58 @@ $env:A23_DATA_DIR = "$PWD\data\demo\data"
 3. 在「填写与验收」选择 01 或 03，核对库里的文档名和模板名，点「开始填写」。完成后可以下载 Excel，以及按行列号查值、原文和拒填理由。与该版本匹配的评分会标注为「参考表评分」或「独立原文核对」。同名文件内容变更后，请先重新导入或抽取。
 4. 如需比较多份文档的事实，在 `/docs` 中调用 `GET /facts`。用主体、指标、期次和口径定位候选。明确来源优先级时指定 `preferred_doc`，可同时查看其余候选。
 
-直接填写目前对应 01 和 03 的模板结构。TXT 和 Markdown 的块编号使用原文行号，DOCX 和 XLSX 使用文档内块序号。XLSX 的块可以全量入库，交给模型抽取的范围是前 200 个非空数据行。03 填表直接使用指定日期区间的结构化数据。
+「一键演示（已有库）」走解析、填写、读报告，要求库内已保存同一版本原文及所需事实。「从上传开始」会先为 01 调用 DeepSeek 抽取入库，或为 03 导入 XLSX 再填写。01 会在发出请求前提示密钥、耗时和费用。直接填写目前对应 01 和 03 的模板结构。TXT 和 Markdown 的块编号使用原文行号，DOCX 和 XLSX 使用文档内块序号。XLSX 的块可以全量入库，交给模型抽取的范围是前 200 个非空数据行。03 填表直接使用指定日期区间的结构化数据。
 
 ## 接入 `dataset/测试集.zip`
 
-在项目根目录解压并执行原文核对。首次执行或需要重建事实库时加 `--extract`，这会用已配置的 DeepSeek 密钥抽取 01。之后可省略该参数，复用事实库重跑。脚本将 16 份测试语料逐份解析并在本机入库，对 01 和 03 各填两次，逐格核对结果、原文坐标和模板原件的校验和。
+从仓库根目录运行下列命令。样本压缩包使用旧式中文文件名编码，由 `unpack_dataset.py` 解码。示例建两个隔离数据库，先复用各自历史抽取事实，再独立读取公开原文核对结果。已有数据库可省略 `--archived-facts` 做同库复验。
 
 ```sh
-.venv/bin/python -m zipfile -e dataset/测试集.zip dataset/测试集
-.venv/bin/python backend/check_dataset.py --extract
-.venv/bin/python backend/check_dataset.py
+work_a23=$(mktemp -d)
+.venv/bin/python backend/unpack_dataset.py --output "$work_a23/corpus"
+.venv/bin/python backend/check_dataset.py --root "$work_a23/corpus" --data-dir "$work_a23/same" \
+  --archived-facts backend/data/deliverables/source/city-original-historical.json
+.venv/bin/python backend/check_dataset.py --root "$work_a23/corpus" --data-dir "$work_a23/same"
+.venv/bin/python backend/check_dataset.py --root "$work_a23/corpus" --data-dir "$work_a23/rebuilt" \
+  --archived-facts backend/data/deliverables/source/city-rebuilt-historical.json
+.venv/bin/python backend/verify.py --same-db-dir "$work_a23/same" --rebuilt-data-dir "$work_a23/rebuilt"
 ```
 
-实际结果、逐格来源、抽取记录和独立核对报告保存在 `backend/data/actual/`。运行以下命令，在 [实际数据工作台](http://127.0.0.1:8001/) 选 01 或 03，使用页面预置的文档名和模板名直接实填。也可选中对应原文，再点「一键演示」查看前五个文档块、填写和下载。演示会复用已有事实库。
+执行真实空库重抽时，另选新的数据目录，在 `check_dataset.py` 中用 `--extract` 代替 `--archived-facts`。它会把 01 城市报告分批发送到 DeepSeek，使用本地密钥并计费。设置 `A23_SOURCE_CHECK_ROOT` 后，页面会对两套公开模板和字节匹配的原文生成本次独立核对报告。
 
 ```sh
-(cd backend && A23_DOC_DIR=../dataset/测试集/包含模板文件 A23_DATA_DIR=data/actual \
-  ../.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8001)
+A23_DOC_DIR="$work_a23/corpus/包含模板文件" A23_DATA_DIR="$work_a23/same" \
+  A23_SOURCE_CHECK_ROOT="$work_a23/corpus" \
+  .venv/bin/python -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8001
 ```
 
-| 场景 | 原文核对口径 | 实测结果 |
-| --- | --- | --- |
-| 01 城市经济 | 按报告的正文段落顺序核对城市名和四项数值 | 113 个原文块、100 行，500 格与原文一致 |
-| 03 历史疫情 | 按日期和国家排序，从源 XLSX 逐字段对照，空值保留 | 2,542 行 × 7 列，17,464 格与原文一致，330 格为空，误填与漏填均为 0 |
+01 原文核对为 113 块、100 行、500 格；03 为 2,542 行，应填 17,464 格，应空 330 格，实测误填和漏填均为 0。已有参考结果时，可以运行 `check_fill.py` 或设置 `A23_REFERENCE_DIR`。公开压缩包当前包含原文和模板，正式参考结果仍需另行提供。两次历史抽取及本轮结果可独立查阅。[出库产物与核对记录](docs/六周验收记录.md)
 
-01 使用 `deepseek-flash` 在两个独立数据库各抽取一次，分别耗时 106.12 秒和 120.40 秒，两次都保留 400 条带原文证据的事实。两套模板在同库复验与重建库中的逐格记录一致。真实清单抽取另覆盖药品流通 TXT（保留 28 条）、文旅 Markdown（用原文指标名复跑后保留 3 条）和逐日统计 XLSX（前 200 行保留 400 条）。
+### 解析与抽取实测
 
-03 的 Word 材料记录了单日省级情况，已解析作为范围核对材料。填表采用源 XLSX 中的国家或地区逐日数据。压缩包还含空气质量 Word 模板，填表验收范围为六周任务的 01 和 03。压缩包未附参考结果工作簿，以上数字来自独立原文核对，正式评分等参考表补齐。
+四份公开样本各调用 `/parse` 两次，完整响应一致。TXT 与 Markdown 都接受 UTF-8 和 UTF-8 BOM，按行切块并保留原行号。DOCX 使用段落或表格坐标，XLSX 使用工作表名和原行号。四格式都返回 `file` 及统一的 `blocks`，只读解析不会入库。
+
+| 样本 | 块数 | 两次解析耗时（秒） |
+| --- | ---: | --- |
+| 药品流通 TXT | 70 | 0.020、0.001 |
+| 文旅 Markdown | 68 | 0.001、0.001 |
+| 南京公报 DOCX | 1,217（271 段 + 946 格） | 0.035、0.036 |
+| 逐日统计 XLSX | 15,088 | 0.383、0.381 |
+
+GBK TXT、CSV 和损坏 DOCX 实测均返回 400。以下四格式抽取数据来自同一份历史实验记录。模型为 `deepseek-flash`，temperature 0，批大小 30。XLSX 的模型调用范围为前 200 个非空数据行，以控制调用时长。后续 TXT 两轮的输入摘要和原始响应单独保留。[四格式历史记录](backend/data/extraction_results.json) · [TXT 两轮对照](docs/六周验收记录.md#txt-两轮对照)
+
+| 样本 | 模式 | 入库块数 | 候选 | 保留 | 丢弃 | 耗时（秒） |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| TXT | 通用 | 70 | 184 | 181 | 3 | 72.46 |
+| TXT | 清单 | 70 | 18 | 18 | 0 | 32.31 |
+| Markdown | 通用 | 68 | 214 | 214 | 0 | 117.35 |
+| Markdown | 清单 | 68 | 3 | 3 | 0 | 9.86 |
+| DOCX | 通用 | 1,217 | 2,151 | 1,761 | 390 | 405.11 |
+| DOCX | 清单 | 1,217 | 12 | 12 | 0 | 23.01 |
+| XLSX | 通用 | 15,088 | 2,430 | 2,390 | 40 | 276.79 |
+| XLSX | 清单 | 15,088 | 400 | 400 | 0 | 24.61 |
+
+指标保留原文说法，同义词映射覆盖 GDP、人口、财政、销售和逐日病例等十余项。期次优先读数值所在句，其次继承最近年份标题。两份真实公开公报的同键床位数分别为 1037 和 1029.8 万张，默认保留两条，指定来源后可选用一条。[多源复核](backend/data/deliverables/source/fusion-real.json)
 
 ## 部署到 Linux 服务器
 
@@ -119,8 +156,7 @@ sudo -u a23 -H sh -ec '
   cd /opt/a23
   python3.14 -m venv .venv
   .venv/bin/python -m pip install -r backend/requirements.txt
-  npm --prefix frontend ci
-  npm --prefix frontend run build
+  (cd frontend && npm ci && npm run build)
 '
 ```
 
@@ -158,6 +194,8 @@ sudo journalctl -u a23 -n 50
 
 ## 验收
 
+核心接口与版本字段见开发规格。`/reports` 可以在工作台用「读取报告」查看当前结果。点击已有库演示时需要先上传原文。试过的三个错误提示为「后端没有响应，请启动服务后重试。」「库里没有这份文档」「没有这份文档的填写记录」。[接口与评分约定](docs/开发规格.md#功能与验收)
+
 在项目根目录运行自动化与合成验收。先构建前端，以便覆盖静态页面路由。
 
 ```sh
@@ -176,85 +214,74 @@ sudo journalctl -u a23 -n 50
 
 已验证原始样本的块数、行数、分母和逐格原文一致性。相对正式参考表的准确率及正式同库与重建库验收等参考表补齐后记录。[第四周任务](六周任务/第四周任务.md) · [第六周任务](六周任务/第六周任务.md)
 
-## 六周交接记录
+## 六周交接
 
-### 一分钟说明
+### 一分钟版
 
-在新目录克隆后，按本页「本地运行」安装和构建，再按「用合成样例上手」完成两套填表和评分。收到测试集压缩包后，按「接入测试集」运行，页面可显示独立原文核对结果。填表先输出带版本的工作簿和逐格记录，与版本匹配的评分才在页面显示。
+工作台把原文解析、事实入库、Excel 填写、报告和逐格追溯连在一起。最快的路径是在新环境生成合成样例，构建 Vue 页面，用 FastAPI 提供页面和 API。默认合成验收全程离线。公开数据的原文核对可以复用历史事实；新的 01 抽取需要本机配置 DeepSeek。
 
-### 环境与仓库
+### 八行数字口径表
 
-实测平台为 macOS Apple Silicon。`python -V` 输出 `Python 3.14.6`，`git --version` 输出 `git version 2.54.0`，`node -v` 输出 `v26.3.0`，`npm -v` 输出 `11.16.0`。项目按用户指定交付到公开 GitHub，以同一账号和项目名查询 Gitee 返回 404。[GitHub 项目](https://github.com/ADGaiNai6657/A23)
+每项的机器判定值见权威 JSON，评分报告按执行时所选依据读取 `eval_report*.json` 或 `source_report*.json`。[判据配置](backend/data/source_expectations.json)
 
-### 解析交付
+| 数字 | 数据来源 | 同机同库 | 空库重抽 | 与谁比 | 为什么 |
+| --- | --- | --- | --- | --- | --- |
+| 原文块数 | `/parse` 的 `blocks` 长度 | 逐位 | 逐位 | 判据 `block_count` | 依赖原文字节和解析器 |
+| 行数 | `/fill` 的 `rows` | 逐位 | 逐位 | 判据 `rows` | 01 正文筛选和 03 日期、国家排序决定行 |
+| 写入格数 | `/fill` 的 `cells_written` | 逐位 | 01 区间，03 逐位 | 判据 `cells_written` | 01 依赖可用事实 |
+| 空着的格数 | `/fill` 的 `cells_empty` | 逐位 | 01 区间，03 逐位 | 判据 `cells_empty` | 直接取真实空格，03 另核对固定应空分母 |
+| 单元格准确率 | `/reports` 的 `cell_accuracy` | 逐位 | 01 区间 | 判据 `cell_accuracy` | 01 正确格数除以总格数 |
+| 行完整率 | `/reports` 的 `row_completeness` | 逐位 | 01 区间 | 判据 `row_completeness` | 01 五格均写入的行数除以总行数 |
+| 耗时 | `X-A23-Fill-Seconds` 和 `fill_report*.json` | 记量级 | 记量级 | 验收记录中的本机耗时 | 写表和存储耗时随机器负载改变 |
+| 抽取条数 | `/extract` 的 `count`、`kept` | 仅记录 | 仅记录 | 每次抽取日志和差异清单 | 模型返回会变化，在线调用单列 |
 
-同一份样本各请求两次 `POST /parse`，完整响应一致。耗时含本机请求、解析和响应序列化。XLSX 计时未调用模型。
-
-| 指定样本 | 块数 | 两次耗时（秒） | 定位 |
-| --- | ---: | --- | --- |
-| 药品流通 TXT | 70 | 0.003、0.001 | 原文行号 |
-| 文旅 Markdown | 68 | 0.001、0.001 | 原文行号 |
-| 南京统计公报 DOCX | 1,217 | 0.036、0.036 | 271 段和 946 格，按段落号或表号、行列号定位 |
-| 逐日统计 XLSX | 15,088 | 0.378、0.392 | 工作表和原表行号 |
-
-不支持的 CSV、无法解码的 TXT、损坏的 DOCX 均返回 400，分别提示格式、内容或文件损坏。[完整 TXT](backend/data/parse_result.json) · [完整 DOCX](backend/data/parse_result_docx.json) · [XLSX 前 200 块](backend/data/parse_result_xlsx.json)
-
-### 第三周真实抽取
-
-模型为 `deepseek-flash`，请求参数为 temperature 0、批大小 30。耗时记录并发批次的实际经过时间。XLSX 入库 15,088 块，前 200 个非空数据行参与模型抽取。
-
-| 样本 | 模式 | 入库块数 | 抽出 | 保留 | 丢弃 | 秒 |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| TXT | 通用 | 70 | 184 | 181 | 3 | 72.46 |
-| TXT | 清单 | 70 | 18 | 18 | 0 | 32.31 |
-| Markdown | 通用 | 68 | 214 | 214 | 0 | 117.35 |
-| Markdown | 清单 | 68 | 3 | 3 | 0 | 9.86 |
-| DOCX | 通用 | 1,217 | 2,151 | 1,761 | 390 | 405.11 |
-| DOCX | 清单 | 1,217 | 12 | 12 | 0 | 23.01 |
-| XLSX | 通用 | 15,088 | 2,430 | 2,390 | 40 | 276.79 |
-| XLSX | 清单 | 15,088 | 400 | 400 | 0 | 24.61 |
-
-清单、丢弃原因和各次耗时见抽取记录。首次 DOCX 通用抽取遇到坏字段而中断，修复后保留可独立核对的事实并记下拒收原因。XLSX 两种模式合计保留 2,790 条，导出前 200 条，其他样本完整导出。用 `check_extract.py --export-only` 可从已有数据库生成导出。同后缀有多个样本时，导出名带源文件名。[八次实测](backend/data/extraction_results.json) · [引导档事实](backend/data/facts_export.json) · [导出清单](backend/data/facts_export_manifest.json)
-
-事实保存原指标名，归并键用于查询。期次取值同句的年份、同句最大年份或上文标题，记录期次来源块。同键异值保留全部候选，缺少明确来源优先级时拒绝采用，指定来源后保存采用标记和决策理由。控制用例还验证 2024 和 2025 各自回到原文第 1 行。[多源证据](backend/data/fusion_evidence.json)
-
-### 数字口径与复验
-
-01 的 113 块、100 行及城市顺序是固定锚点。单元格准确率是正确格数除以 500，行完整率是五格都写满的行数除以 100。03 固定 2,542 行，覆盖 17,464 个应填格和 330 个应空格。对格率和漏填率的分母是 17,464，误填率的分母是 330。03 的日期按年月日比较，Excel 数值序列按各工作簿的纪元转换。
-
-同库复验逐项精确比较。重建库复验中，01 的四项模型相关数字可用实测区间，其余判据精确比较。当前两个独立抽取的 01 实测点均为写入 500 格、空 0 格、单元格准确率 100%、行完整率 100%，因此本版原文口径使用对应的单点区间。[原文判据及观测](backend/data/source_expectations.json)
+03 对格率和漏填率以应填格为分母，误填率以应空格为分母。`wrong_values` 统计应填但填错的格，`missed` 统计应填却留空的格。评分差异保留坐标和实际值。生成完整六字段表的命令如下。
 
 ```sh
-.venv/bin/python backend/check_dataset.py --data-dir backend/data/actual
-.venv/bin/python backend/acceptance.py --basis source --data-dir backend/data/actual \
-  --expectations backend/data/source_expectations.json --mode same-db
-
-.venv/bin/python backend/check_dataset.py --data-dir backend/data/actual/rebuilt-new --extract
-.venv/bin/python backend/acceptance.py --basis source --data-dir backend/data/actual/rebuilt-new \
-  --expectations backend/data/source_expectations.json --mode rebuilt
+.venv/bin/python backend/acceptance.py --print-criteria --basis source
 ```
 
-隔离目录实测输出如下。删除报告的随机目录已缩写。
+### 从零到有数
 
-```text
-改数 | exit=1 | 01.rows 预期 100，实际 99，检查 source_report.json
-改键 | exit=1 | 01.rows 预期 100，实际 None，检查 source_report.json
-删除报告 | exit=1 | 验收失败：01 缺少本次报告 <隔离目录>/source_report.json，预期文件存在，实际缺失
-恢复 | exit=0 | 验收通过，共 19 条数值判据
-```
+需要 Git、Python 3.14 和 Node.js `^22.18.0 || >=24.12.0`。以下为 macOS/Linux，除克隆和进入目录外都在仓库根目录执行。Windows 用 `py -3.14` 建环境、`.venv\Scripts\python.exe` 运行脚本，进入 `frontend` 后调用 `npm.cmd`，启动前用 PowerShell 的 `$env:变量名` 设置环境变量。
 
-| 交叉验收项目 | 方式 | 结果 |
+1. 克隆并进入项目。`git clone https://github.com/ADGaiNai6657/A23.git && cd A23`
+2. 建独立环境。`python3.14 -m venv .venv`
+3. 安装锁定依赖。`.venv/bin/python -m pip install -r backend/requirements.txt`
+4. 确定演示数据目录。`export A23_DATA_DIR="$(mktemp -d)"`。仅真实抽取时在 `backend/.env` 配置 `DEEPSEEK_API_KEY`。上述合成路径无需密钥。
+5. 安装前端并构建。`(cd frontend && npm ci && npm run build)`
+6. 准备原文、模板和参考表。`.venv/bin/python backend/demo.py --inputs-only`
+7. 从命令行建库并填表。`.venv/bin/python backend/demo.py`。它对 01 使用固定模型替身并抽取入库，对 03 直接导入。若要演示 03 空库上传，可跳过此步。
+8. 启动。`A23_DOC_DIR="$A23_DATA_DIR/demo/doc" A23_REFERENCE_DIR="$A23_DATA_DIR/demo/doc" A23_DATA_DIR="$A23_DATA_DIR/demo/data" .venv/bin/python -m uvicorn main:app --app-dir backend --port 8000`
+9. 打开工作台。`http://127.0.0.1:8000`。在页面选择 01，上传 `$A23_DATA_DIR/demo/doc/合成城市报告.docx`，将模板名填为 `模板_合成城市.xlsx`，点「一键演示（已有库）」。期望 1 行、5 格、两个率均为 100%，填写耗时单列。选择 03 后上传同目录的 `合成逐日统计.xlsx`，模板名填 `模板_合成逐日.xlsx`，点「从上传开始」，期望 3 行、19 格、2 格应空。
+10. 在第二个终端跑验收。`.venv/bin/python backend/verify.py`。依次检查 pytest、交付文件、合成同库、合成空库和临时破坏性测试。公开数据两种模式的命令见「接入测试集」。
+
+### 已知局限
+
+- 正式参考结果仍缺，训练测试集实测使用独立原文核对。03 的填写与原文核对均采用同一逐日工作簿，核对可发现转换与排序错误。
+- 模板规则固定为 01/03。测试集的空气质量 Word 模板能解析，填写能力列入竞赛扩展。
+- XLSX 全量解析，模型抽取只看前 200 个非空数据行。03 填写按日期范围直接处理结构化数据。
+- 事实三关核对块号、原话和数字。模型仍可能抄错主体、统计口径或单位，须按来源追溯。
+- 真正空库在线重抽存在波动。药品流通 TXT 本轮留档 26/24 条，修复清单同义词后重放为 26/25 条。
+- `dist/`、工作数据库与密钥不入仓。换环境时从交接指定的目录准备材料和数据。
+- 本轮跨平台验证范围为 macOS Apple Silicon；Windows 尚无实机证据。表 C 记录的是单人独立 Clone，第三方互验仍待执行。[验收记录与 A/B/C 表](docs/六周验收记录.md)
+
+### 哪些数不能逐位
+
+同库使用 `same-db` 的逐位值。空库重抽使用 `rebuilt`，只允许 01 四项模型相关指标使用区间。两个独立历史实验都保留了 400 条城市事实，四项指标的两端相同，因此目前是单点区间。超出区间按配置失败并查日志。03 的行数、分母和指标仍逐位。耗时和抽取条数仅供记录。
+
+### 出问题先看三处
+
+1. 检查 `frontend/dist/index.html` 和 `/health`。前端依赖安装和构建均在 `frontend` 执行。
+2. 真实抽取失败时检查 `backend/.env`、网络报错和 `extraction-runs/`。代理导致 PyPI TLS 中断时，可在环境允许直连的情况下对安装命令临时取消 `HTTP_PROXY` 和 `HTTPS_PROXY`。
+3. 查 `A23_DATA_DIR` 的文档版本、事实和评分报告。模板目录看 `A23_DOC_DIR`，评分依据看 `A23_REFERENCE_DIR` 或 `A23_SOURCE_CHECK_ROOT`。评分与本次 `run_id`、工作簿校验和不符时，页面提示本次暂无评分。
+
+三格追溯、两套场景的拒填与缺失例子、样本耗时和终端留证见验收记录。详情按 Excel 行列号请求，01 和 03 共用一个面板，可查各自结果的全部数据格。03 的 17,794 格按需查询，避免一次加载整份逐格报告。[六周验收记录](docs/六周验收记录.md) · [核心功能说明](docs/核心功能说明.md)
+
+| 结果格 | 判定与值 | 原文证据 |
 | --- | --- | --- |
-| 新目录接手 | 独立克隆本地基线并应用本轮补丁，重新安装依赖 | 页面和健康检查可用，36 条回归测试、13 条合成判据通过 |
-| 同库复验 | 在隔离目录复制已有库，两次重填并独立核对 | 01 写入 500 格，03 写入 17,464 格并保留 330 个空格，19 条判据通过 |
-| 重建库复验 | 独立目录从空库真实重抽，耗时 156.87 秒，再填写两套模板 | 01 保留 400 条事实，两套原文核对均通过，共 19 条判据 |
-| 拒填追溯 | 按国家名顺序核对 5 个各有至少两格拒填的国家 | 10 格均可回查原文坐标与拒填理由 |
+| 公开 01 B2 | 对，上海 GDP 为 56,708.71 亿元 | 城市报告第 4 块／第 4 段，「上海以 56,708.71 亿元的 GDP 总量稳居全国第一」 |
+| 合成 01 B2 | 值不符，填入 100，临时对照表指定 999 | 合成城市报告第 1 块／第 1 段，「GDP总量100亿元」 |
+| 公开 03 F3 | 应空，Algeria 当天的每日检测数缺值 | 疫情源 XLSX 第 498 块，`Data!499`，按行和「每日检测数」表头可核查原格为空 |
 
-### 局限与排查
-
-- 正式参考表尚缺。页面的「独立原文核对」用于回归，正式评分走 `check_fill.py`。
-- 当前填表范围是 01 和 03 的 XLSX 模板。空气质量 DOCX 模板可解析，填表功能待扩展。
-- 在线 XLSX 抽取处理前 200 个非空数据行。入库块数和按日期填表的覆盖范围另行核对。
-- 在线抽取有条数波动。药品流通 TXT 的同一清单先后保留 28 条和 18 条，逐条证据校验均已执行。
-- 当前桌面工作台已验证 macOS 浏览器，Windows 仍待实机复验。
-- 首页不可用先访问 `/health`，模板错误查 `A23_DOC_DIR` 与文件名，报告缺失查 `A23_DATA_DIR` 下的评分、逐格记录及版本。输入更新后，按场景重新导入或抽取，再填写并生成自检报告。
+公开 01 的两个率原文核对均为 100%。同库两次填写耗时约 0.01 秒，03 约 0.6 秒。完整测试覆盖改坏评分和恢复，交叉验收本轮采用单人替代路径。[终端记录](backend/data/deliverables/acceptance-failures.txt) · [表 A/B/C](docs/六周验收记录.md#交叉验收)

@@ -1,0 +1,92 @@
+{
+  "doc": "合成城市报告.docx",
+  "file": "filled_2025中国城市经济百强.xlsx",
+  "rows": 1,
+  "cells_written": 5,
+  "cells_empty": 0,
+  "cells": [
+    {
+      "row": 2,
+      "column": 1,
+      "value": "甲城",
+      "decision": "filled",
+      "reason": "城市正文段首",
+      "source": {
+        "doc": "合成城市报告.docx",
+        "block_no": 1,
+        "locator": {
+          "paragraph": 1
+        },
+        "block_sha256": "c2ed273b649aee15501327f2e2db0de5d83a0085e9699f02171339656a9c3d83"
+      }
+    },
+    {
+      "row": 2,
+      "column": 2,
+      "value": "100",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成城市报告.docx",
+        "block_no": 1,
+        "locator": {
+          "paragraph": 1
+        },
+        "block_sha256": "c2ed273b649aee15501327f2e2db0de5d83a0085e9699f02171339656a9c3d83"
+      }
+    },
+    {
+      "row": 2,
+      "column": 3,
+      "value": "20",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成城市报告.docx",
+        "block_no": 1,
+        "locator": {
+          "paragraph": 1
+        },
+        "block_sha256": "c2ed273b649aee15501327f2e2db0de5d83a0085e9699f02171339656a9c3d83"
+      }
+    },
+    {
+      "row": 2,
+      "column": 4,
+      "value": "50000",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成城市报告.docx",
+        "block_no": 1,
+        "locator": {
+          "paragraph": 1
+        },
+        "block_sha256": "c2ed273b649aee15501327f2e2db0de5d83a0085e9699f02171339656a9c3d83"
+      }
+    },
+    {
+      "row": 2,
+      "column": 5,
+      "value": "10",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成城市报告.docx",
+        "block_no": 1,
+        "locator": {
+          "paragraph": 1
+        },
+        "block_sha256": "c2ed273b649aee15501327f2e2db0de5d83a0085e9699f02171339656a9c3d83"
+      }
+    }
+  ],
+  "source_sha256": "60e1f91bcfbe1910deadfc5439ddba739a238ce5e787ddd5401fcf0950844311",
+  "template_sha256": "321c14d8ac01a3806725e80b28864b58a27d47f7de9029d12d7c256f3c23cfb2",
+  "block_count": 1,
+  "refusal_counts": {},
+  "result_id": "a4757e0fc9c5cd9b19cfd120be955d4a778a899aca4b6931b4cddbc7f5982a39",
+  "run_id": "ef1a311f43e14d72b3bf6f65dbab7c15",
+  "workbook_sha256": "cc58873b41fd6f472f7d0405b11ec237be1797c00d050e2b228dea29ab6cd9aa",
+  "fill_seconds": 0.0034
+}

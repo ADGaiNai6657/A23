@@ -1,0 +1,30 @@
+{
+  "doc": "合成逐日统计.xlsx",
+  "file": "filled_covid19_byday.xlsx",
+  "rows": 3,
+  "cells_written": 19,
+  "cells_empty": 2,
+  "diff": [],
+  "expected_empty": 2,
+  "false_fills": 0,
+  "missed": 0,
+  "wrong_values": 0,
+  "basis": "reference-workbook",
+  "reference_sha256": "a2d33e07b1b0e56bee1a397685d83e9f4112bb38568738b08d89c9e14e6c70d4",
+  "result_id": "d2fc52225bed2e81685fe6be5587f77a84112d58816fecd6035c55a0d3edc621",
+  "run_id": "01f5fec41fd34cea80a008979a84342d",
+  "source_sha256": "edcf8cff2b1a8eb07d52d052ba9a5dccdd5d3f9b3b4127bd5a107ede52a5398a",
+  "template_sha256": "6f1d38fd370de2786a12ad33e14655c107fc4db246a48356e817aba8901d15ed",
+  "workbook_sha256": "45c7f249b561545175f293fb4d6f368796e97e5a615412368515cc7b05aafe87",
+  "fill_seconds": 0.0031,
+  "refusal_counts": {
+    "source_blank": 2
+  },
+  "block_count": 4,
+  "database_sha256": "7061c61dbc00a6c3056a77dd16c2a67740ddba2b631c3009df8e858928e884b4",
+  "required": 19,
+  "correct": 19,
+  "correct_rate": 1.0,
+  "false_fill_rate": 0.0,
+  "missed_rate": 0.0
+}

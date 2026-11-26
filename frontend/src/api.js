@@ -15,8 +15,11 @@ async function send(path, options) {
   if (!payload) throw new Error('后端返回的数据格式有误。')
   const source = response.headers.get('X-A23-Source-SHA256')
   const result = response.headers.get('X-A23-Result-ID')
+  const seconds = response.headers.get('X-A23-Fill-Seconds')
   if (source) payload.source_sha256 = source
   if (result) payload.result_id = result
+  if (seconds !== null) payload.fill_seconds = Number(seconds)
+  if (response.headers.get('X-A23-Score-Status') === 'failed') payload.score_failed = true
   return payload
 }
 
@@ -42,7 +45,7 @@ export const api = {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ doc, template, source_sha256: sourceSha256 }),
   }),
-  reports: (doc, file, resultId) => send('/reports?' + params({ doc, file, result_id: resultId })),
+  reports: (doc, file, resultId) => send('/reports?' + params({ doc, file, ...(resultId ? { result_id: resultId } : {}) })),
   cell: (doc, file, row, column, resultId) => send('/cells?' + params({ doc, file, row, column, result_id: resultId })),
-  download: (name) => '/files?' + params({ name }),
+  download: (name, resultId) => '/files?' + params({ name, result_id: resultId }),
 }

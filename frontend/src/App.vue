@@ -9,6 +9,7 @@ const layouts = {
     template: '2025年中国城市经济百强全景报告-模板.xlsx',
     output: 'filled_2025中国城市经济百强.xlsx',
     columns: 5,
+    extension: /\.docx$/i,
     action: 'extract',
     guide: '上传城市报告 DOCX，抽取事实后填写 Excel。',
     rates: [['单元格准确率', 'cell_accuracy'], ['行完整率', 'row_completeness']],
@@ -19,6 +20,7 @@ const layouts = {
     template: 'COVID-19 模板.xlsx',
     output: 'filled_covid19_byday.xlsx',
     columns: 7,
+    extension: /\.xlsx$/i,
     action: 'ingest',
     guide: '导入逐日统计 XLSX，使用表中数据直接填写。',
     rates: [['对格率', 'correct_rate'], ['误填率', 'false_fill_rate'], ['漏填率', 'missed_rate']],
@@ -30,6 +32,10 @@ const fileActions = [
   { id: 'extract', title: '抽取事实并入库', pending: '正在抽取事实' },
 ]
 const decisions = { filled: '已填写', refused: '已拒填', missing: '没有记录' }
+const refusalLabels = {
+  missing_fact: '缺少抽取事实', incompatible_value: '数值或单位不符',
+  source_blank: '原文缺值', conflict: '来源冲突',
+}
 const connections = { checking: '正在连接', online: '后端在线', offline: '后端未连接' }
 
 const kind = ref('city')
@@ -129,7 +135,7 @@ function useFile(action) {
     const response = await api[action.id](file.value, metrics.value)
     let text
     if (action.id === 'extract') {
-      text = `抽到 ${response.count} 条，保留 ${response.kept} 条有证据的事实。`
+      text = extractionSummary(response)
     } else {
       const count = action.id === 'parse' ? response.blocks.length : response.blocks
       if (action.id === 'parse') preview.value = response.blocks.slice(0, 5)
@@ -140,7 +146,35 @@ function useFile(action) {
   })
 }
 
-async function fill(demo = false) {
+function extractionSummary(response) {
+  const reasons = Object.entries(response.rejected ?? {}).map(([reason, count]) => `${reason} ${count} 条`)
+  return `抽到 ${response.count} 条，保留 ${response.kept} 条有证据的事实。${reasons.join('、')}`
+}
+
+function showResult(doc, summary, elapsed) {
+  result.value = { doc, ...summary, elapsed }
+  detail.value = null
+  feedback.value.detail = null
+  row.value = 2
+  column.value = 1
+}
+
+function readScore() {
+  const doc = source.value.trim()
+  if (!doc) {
+    feedback.value.fill = { error: true, text: '请输入库里的文档名。' }
+    return
+  }
+  return run('fill', '正在读取自检报告', async () => {
+    const score = await api.reports(doc, layout.value.output)
+    showResult(doc, score, score.fill_seconds?.toFixed(2))
+    report.value = score
+    feedback.value.fill = { text: '已载入本次填写的自检报告。' }
+  })
+}
+
+async function fill(mode = 'fill') {
+  const demo = mode !== 'fill'
   if (demo && !file.value) {
     feedback.value.input = { error: true, text: '请先选择要演示的源文档。' }
     fileInput.value?.focus()
@@ -150,7 +184,17 @@ async function fill(demo = false) {
     feedback.value.fill = { error: true, text: '请输入文档名和模板文件名。' }
     return
   }
+  const full = mode === 'full'
+  if (full && !layout.value.extension.test(file.value.name)) {
+    feedback.value.fill = { error: true, text: '上传的文档格式与所选模板类型不匹配。' }
+    return
+  }
+  if (full && kind.value === 'city' && !window.confirm(
+    '将文档分批发送到 DeepSeek，需要配置 API Key，可能等待数分钟并产生 API 费用。继续吗？',
+  )) return
   await run('fill', demo ? '正在解析文档' : '正在填写表格', async () => {
+    result.value = report.value = detail.value = null
+    feedback.value.detail = null
     let sourceSha256
     if (demo) {
       const parsed = await api.parse(file.value)
@@ -159,20 +203,20 @@ async function fill(demo = false) {
       source.value = parsed.file
       sourceSha256 = parsed.source_sha256
       feedback.value.input = { text: `解析完成，共 ${parsed.blocks.length} 个块。` }
+      if (full) {
+        const extract = layout.value.action === 'extract'
+        pending.value.label = extract ? '正在调用 DeepSeek 抽取并入库' : '正在导入文档块'
+        const saved = await api[layout.value.action](file.value, metrics.value)
+        feedback.value.input = {
+          text: extract ? extractionSummary(saved) : `已入库，共 ${saved.blocks} 个块。`,
+        }
+      }
       pending.value.label = '正在填写表格'
     }
     const doc = source.value.trim()
     const started = performance.now()
     const summary = await api.fill(doc, template.value.trim(), sourceSha256)
-    result.value = {
-      doc,
-      ...summary,
-      elapsed: ((performance.now() - started) / 1000).toFixed(2),
-    }
-    report.value = detail.value = null
-    feedback.value.detail = null
-    row.value = 2
-    column.value = 1
+    showResult(doc, summary, (summary.fill_seconds ?? (performance.now() - started) / 1000).toFixed(2))
     pending.value.label = '正在读取自检报告'
     try {
       report.value = await api.reports(doc, layout.value.output, summary.result_id)
@@ -326,13 +370,16 @@ function percent(value) {
               </label>
             </div>
             <div class="fill-actions">
-              <button class="button button-secondary" type="button" @click="fill(true)">一键演示</button>
+              <button class="button button-secondary" type="button" @click="fill('prepared')">一键演示（已有库）</button>
+              <button class="button button-secondary" type="button" @click="fill('full')">从上传开始</button>
+              <button class="button button-secondary" type="button" @click="readScore">读取报告</button>
               <button class="button button-primary" type="submit">
                 开始填写 <span aria-hidden="true">→</span>
               </button>
             </div>
           </fieldset>
         </form>
+        <p class="feedback">已有库演示要求上传的原文已{{ kind === 'city' ? '抽取事实' : '导入' }}。从上传开始会{{ kind === 'city' ? '调用 DeepSeek 并产生 API 用量' : '导入 XLSX，无需调用模型' }}。</p>
 
         <p v-if="feedback.fill?.error" class="feedback feedback-error" role="alert">{{ feedback.fill.text }}</p>
         <p v-else class="feedback" role="status">{{ pending?.area === 'fill' ? `${pending.label}…` : feedback.fill?.text }}</p>
@@ -347,7 +394,7 @@ function percent(value) {
           <p v-if="result" class="result-document">{{ result.doc }}</p>
           <p v-else>填写完成后可下载 Excel，并检查每个单元格的来源。</p>
         </div>
-        <a v-if="result" class="button button-secondary download" :href="api.download(layout.output)" download>
+        <a v-if="result" class="button button-secondary download" :href="api.download(layout.output, result.result_id)" download>
           <span aria-hidden="true">↓</span> 下载填写结果
         </a>
       </header>
@@ -357,7 +404,7 @@ function percent(value) {
           <div><dt>数据行</dt><dd>{{ result.rows }}</dd></div>
           <div><dt>写入格数</dt><dd>{{ result.cells_written }}</dd></div>
           <div><dt>空格</dt><dd>{{ result.cells_empty }}</dd></div>
-          <div><dt>填写耗时</dt><dd>{{ result.elapsed }} <span>秒</span></dd></div>
+          <div><dt>填写耗时</dt><dd>{{ result.elapsed ?? '—' }} <span v-if="result.elapsed != null">秒</span></dd></div>
         </dl>
         <div v-if="report" class="report">
           <p>{{ report.basis === 'independent-source-check' ? '独立原文核对' : '参考表评分' }}</p>
@@ -368,7 +415,10 @@ function percent(value) {
             </div>
           </dl>
         </div>
-        <p v-else class="report-empty">暂无这份文档的自检报告。</p>
+        <p v-else class="report-empty">{{ result.score_failed ? '本次自检生成失败，请检查参考表和核对材料。' : '本次填写暂无匹配的自检报告。' }}</p>
+        <p v-if="report && Object.keys(report.refusal_counts ?? {}).length" class="report-empty">
+          拒填分类：{{ Object.entries(report.refusal_counts).map(([key, count]) => `${refusalLabels[key]} ${count} 格`).join('、') }}
+        </p>
 
         <div class="trace">
           <form @submit.prevent="inspectCell">
@@ -399,6 +449,12 @@ function percent(value) {
               <p v-if="detail.evaluation">本次自检判定 {{ detail.evaluation }}</p>
               <p v-if="detail.evidence_status === 'stale'">原文已变更，请重新填写后核查来源。</p>
               <p v-if="detail.source">{{ detail.source.doc }} · 第 {{ detail.source.block_no }} 块</p>
+              <p v-if="detail.source?.locator">
+                <template v-if="detail.source.locator.sheet">
+                  {{ detail.source.locator.sheet }} · 第 {{ detail.source.locator.row }} 行
+                </template>
+                <template v-else-if="detail.source.locator.paragraph">第 {{ detail.source.locator.paragraph }} 段</template>
+              </p>
               <blockquote v-if="detail.text">{{ detail.text }}</blockquote>
             </div>
           </div>

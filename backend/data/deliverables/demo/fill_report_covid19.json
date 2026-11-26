@@ -1,0 +1,370 @@
+{
+  "doc": "合成逐日统计.xlsx",
+  "file": "filled_covid19_byday.xlsx",
+  "rows": 3,
+  "cells_written": 19,
+  "cells_empty": 2,
+  "cells": [
+    {
+      "row": 2,
+      "column": 1,
+      "value": "2020-07-01",
+      "decision": "filled",
+      "reason": "日期列",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 3,
+        "locator": {
+          "row": 4,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "5f19720b130cf3a7c7b52918945ac1396add4f193fe244dfd4dd24d309d5d1ac"
+      }
+    },
+    {
+      "row": 2,
+      "column": 2,
+      "value": "Alpha",
+      "decision": "filled",
+      "reason": "国家或地区列",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 3,
+        "locator": {
+          "row": 4,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "5f19720b130cf3a7c7b52918945ac1396add4f193fe244dfd4dd24d309d5d1ac"
+      }
+    },
+    {
+      "row": 2,
+      "column": 3,
+      "value": "2",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 3,
+        "locator": {
+          "row": 4,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "5f19720b130cf3a7c7b52918945ac1396add4f193fe244dfd4dd24d309d5d1ac",
+        "field": "new_cases"
+      }
+    },
+    {
+      "row": 2,
+      "column": 4,
+      "value": "0",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 3,
+        "locator": {
+          "row": 4,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "5f19720b130cf3a7c7b52918945ac1396add4f193fe244dfd4dd24d309d5d1ac",
+        "field": "new_deaths"
+      }
+    },
+    {
+      "row": 2,
+      "column": 5,
+      "value": "3",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 3,
+        "locator": {
+          "row": 4,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "5f19720b130cf3a7c7b52918945ac1396add4f193fe244dfd4dd24d309d5d1ac",
+        "field": "total_cases"
+      }
+    },
+    {
+      "row": 2,
+      "column": 6,
+      "value": "0",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 3,
+        "locator": {
+          "row": 4,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "5f19720b130cf3a7c7b52918945ac1396add4f193fe244dfd4dd24d309d5d1ac",
+        "field": "total_deaths"
+      }
+    },
+    {
+      "row": 2,
+      "column": 7,
+      "value": "100",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 3,
+        "locator": {
+          "row": 4,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "5f19720b130cf3a7c7b52918945ac1396add4f193fe244dfd4dd24d309d5d1ac",
+        "field": "population"
+      }
+    },
+    {
+      "row": 3,
+      "column": 1,
+      "value": "2020-07-01",
+      "decision": "filled",
+      "reason": "日期列",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 2,
+        "locator": {
+          "row": 3,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "c32b4887c7fe884c303c49403f3352cbb4be8324a4ba970febe10a0d3841f980"
+      }
+    },
+    {
+      "row": 3,
+      "column": 2,
+      "value": "Beta",
+      "decision": "filled",
+      "reason": "国家或地区列",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 2,
+        "locator": {
+          "row": 3,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "c32b4887c7fe884c303c49403f3352cbb4be8324a4ba970febe10a0d3841f980"
+      }
+    },
+    {
+      "row": 3,
+      "column": 3,
+      "value": "0",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 2,
+        "locator": {
+          "row": 3,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "c32b4887c7fe884c303c49403f3352cbb4be8324a4ba970febe10a0d3841f980",
+        "field": "new_cases"
+      }
+    },
+    {
+      "row": 3,
+      "column": 4,
+      "value": null,
+      "decision": "refused",
+      "reason": "匹配的来源行在该字段没有可用值",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 2,
+        "locator": {
+          "row": 3,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "c32b4887c7fe884c303c49403f3352cbb4be8324a4ba970febe10a0d3841f980"
+      },
+      "reason_code": "source_blank"
+    },
+    {
+      "row": 3,
+      "column": 5,
+      "value": "5",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 2,
+        "locator": {
+          "row": 3,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "c32b4887c7fe884c303c49403f3352cbb4be8324a4ba970febe10a0d3841f980",
+        "field": "total_cases"
+      }
+    },
+    {
+      "row": 3,
+      "column": 6,
+      "value": "0",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 2,
+        "locator": {
+          "row": 3,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "c32b4887c7fe884c303c49403f3352cbb4be8324a4ba970febe10a0d3841f980",
+        "field": "total_deaths"
+      }
+    },
+    {
+      "row": 3,
+      "column": 7,
+      "value": "200",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 2,
+        "locator": {
+          "row": 3,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "c32b4887c7fe884c303c49403f3352cbb4be8324a4ba970febe10a0d3841f980",
+        "field": "population"
+      }
+    },
+    {
+      "row": 4,
+      "column": 1,
+      "value": "2020-07-02",
+      "decision": "filled",
+      "reason": "日期列",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 1,
+        "locator": {
+          "row": 2,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "7882a2401d641d71fe27df81091f4ba431cf320740ed145d0de7ba8112a17092"
+      }
+    },
+    {
+      "row": 4,
+      "column": 2,
+      "value": "Beta",
+      "decision": "filled",
+      "reason": "国家或地区列",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 1,
+        "locator": {
+          "row": 2,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "7882a2401d641d71fe27df81091f4ba431cf320740ed145d0de7ba8112a17092"
+      }
+    },
+    {
+      "row": 4,
+      "column": 3,
+      "value": null,
+      "decision": "refused",
+      "reason": "匹配的来源行在该字段没有可用值",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 1,
+        "locator": {
+          "row": 2,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "7882a2401d641d71fe27df81091f4ba431cf320740ed145d0de7ba8112a17092"
+      },
+      "reason_code": "source_blank"
+    },
+    {
+      "row": 4,
+      "column": 4,
+      "value": "0",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 1,
+        "locator": {
+          "row": 2,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "7882a2401d641d71fe27df81091f4ba431cf320740ed145d0de7ba8112a17092",
+        "field": "new_deaths"
+      }
+    },
+    {
+      "row": 4,
+      "column": 5,
+      "value": "5",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 1,
+        "locator": {
+          "row": 2,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "7882a2401d641d71fe27df81091f4ba431cf320740ed145d0de7ba8112a17092",
+        "field": "total_cases"
+      }
+    },
+    {
+      "row": 4,
+      "column": 6,
+      "value": "0",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 1,
+        "locator": {
+          "row": 2,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "7882a2401d641d71fe27df81091f4ba431cf320740ed145d0de7ba8112a17092",
+        "field": "total_deaths"
+      }
+    },
+    {
+      "row": 4,
+      "column": 7,
+      "value": "200",
+      "decision": "filled",
+      "reason": "采用唯一符合口径的来源",
+      "source": {
+        "doc": "合成逐日统计.xlsx",
+        "block_no": 1,
+        "locator": {
+          "row": 2,
+          "sheet": "Sheet"
+        },
+        "block_sha256": "7882a2401d641d71fe27df81091f4ba431cf320740ed145d0de7ba8112a17092",
+        "field": "population"
+      }
+    }
+  ],
+  "source_sha256": "edcf8cff2b1a8eb07d52d052ba9a5dccdd5d3f9b3b4127bd5a107ede52a5398a",
+  "template_sha256": "6f1d38fd370de2786a12ad33e14655c107fc4db246a48356e817aba8901d15ed",
+  "block_count": 4,
+  "refusal_counts": {
+    "source_blank": 2
+  },
+  "result_id": "d2fc52225bed2e81685fe6be5587f77a84112d58816fecd6035c55a0d3edc621",
+  "run_id": "01f5fec41fd34cea80a008979a84342d",
+  "workbook_sha256": "45c7f249b561545175f293fb4d6f368796e97e5a615412368515cc7b05aafe87",
+  "fill_seconds": 0.0031
+}

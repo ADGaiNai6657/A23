@@ -12,11 +12,14 @@ from docx import Document
 from openpyxl import load_workbook
 
 from config import BACKEND, ROOT
+from criteria import checked_rules, load_expectations
+from extractor import evidence_error
 from evaluate import matches
-from extractor import MODEL, extract_document
+from check_extract import recorded_extract
 from fill_spec import CITY_OUTPUT, COVID_OUTPUT, REPORT_FILES
 from filler import block_digest, fill_workbook, write_json
 from parsers import parse_document
+from schema import RawFact
 from store import Store
 
 DATASET = ROOT / "dataset" / "测试集"
@@ -152,17 +155,20 @@ def source_score(trace: dict, audit: dict, daily: bool, database_sha256: str) ->
         key: trace[key] for key in (
             "doc", "file", "result_id", "source_sha256", "template_sha256",
             "run_id", "workbook_sha256", "rows", "cells_written", "cells_empty", "block_count",
-        )
+            "fill_seconds", "refusal_counts",
+        ) if key in trace
     }
     score.update({
         "basis": "independent-source-check", "diff": audit["differences"],
         "database_sha256": database_sha256,
+        "expected_empty": audit["source_empty"], "false_fills": audit["false_fills"],
+        "missed": audit["missed"],
+        "wrong_values": sum(item["decision"] == "值不符" for item in audit["differences"]),
     })
     if daily:
         required, empty = audit["source_nonempty"], audit["source_empty"]
         score.update({
             "required": required, "expected_empty": empty, "correct": audit["correct_nonempty"],
-            "false_fills": audit["false_fills"], "missed": audit["missed"],
             "correct_rate": audit["correct_nonempty"] / required,
             "false_fill_rate": audit["false_fills"] / empty, "missed_rate": audit["missed"] / required,
         })
@@ -173,6 +179,26 @@ def source_score(trace: dict, audit: dict, daily: bool, database_sha256: str) ->
             "city_order_matches": audit["city_order_matches"],
         })
     return score
+
+
+def score_published_fill(root: Path, directory: Path, store: Store, file: str, doc: str) -> None:
+    daily = file == COVID_OUTPUT
+    folder, source, template = (DAILY_FOLDER, DAILY_SOURCE, DAILY_TEMPLATE) if daily else (
+        CITY_FOLDER, CITY_SOURCE, CITY_TEMPLATE,
+    )
+    if doc != source:
+        return
+    source_path = root / "包含模板文件" / folder / source
+    trace_name, _, report_name = REPORT_FILES[file]
+    trace = json.loads((directory / trace_name).read_text(encoding="utf-8"))
+    if trace["source_sha256"] != hashlib.sha256(source_path.read_bytes()).hexdigest() or (
+        trace["template_sha256"] != hashlib.sha256(source_path.with_name(template).read_bytes()).hexdigest()
+    ):
+        return
+    expected, _ = daily_expected(source_path) if daily else city_expected(source_path)
+    audit = verify_workbook(directory / file, expected, 7 if daily else 5)
+    score = source_score(trace, audit, daily, hashlib.sha256(store.path.read_bytes()).hexdigest())
+    write_json(directory / report_name, score)
 
 
 def parse_corpus(root: Path, store: Store) -> list[dict]:
@@ -197,19 +223,39 @@ def parse_corpus(root: Path, store: Store) -> list[dict]:
     return inventory
 
 
-def check_dataset(root: Path, output: Path, extract: bool) -> dict:
+def restore_city_facts(store: Store, source: Path, archive: Path) -> None:
+    if store.path.exists():
+        raise ValueError("重放历史事实需要空目录，请指定新的 --data-dir")
+    content = source.read_bytes()
+    saved = json.loads(archive.read_text(encoding="utf-8"))
+    if saved["source_sha256"] != hashlib.sha256(content).hexdigest():
+        raise ValueError("历史事实与本次城市原文的 SHA256 不符")
+    doc = parse_document(content, source.name)
+    blocks = dict(doc.numbered_blocks())
+    records = []
+    for row in saved["facts"]:
+        if row["doc"] != doc.file or row["mode"] != "list" or evidence_error(RawFact.model_validate(row), blocks):
+            raise ValueError(f"历史事实无法回指本次原文，块号 {row['block_no']}")
+        records.append(tuple(row[key] for key in (
+            "block_no", "entity", "metric", "metric_key", "value", "value_num", "unit",
+            "snippet", "period", "period_block_no", "scope",
+        )))
+    store.save(doc, content, "list", records)
+
+
+def check_dataset(root: Path, output: Path, extract: bool, archived_facts: Path | None = None) -> dict:
     templates = root / "包含模板文件"
     city_source = templates / CITY_FOLDER / CITY_SOURCE
     city_template = city_source.with_name(CITY_TEMPLATE)
     daily_source = templates / DAILY_FOLDER / DAILY_SOURCE
     daily_template = daily_source.with_name(DAILY_TEMPLATE)
     store = Store(output / "a23.db")
+    if archived_facts is not None:
+        restore_city_facts(store, city_source, archived_facts)
     if extract:
-        started = perf_counter()
-        print(f"{MODEL} 正在抽取 01 城市原文", flush=True)
-        extraction = extract_document(city_source.read_bytes(), CITY_SOURCE, CITY_METRICS, store)
-        extraction["seconds"] = round(perf_counter() - started, 2)
-        extraction["model"] = MODEL
+        print("正在调用 DeepSeek 抽取 01 城市原文", flush=True)
+        run = recorded_extract(city_source, city_source.read_bytes(), CITY_METRICS, store, 1)
+        extraction = {**run["result"], **{key: run[key] for key in ("run_id", "model", "seconds")}}
         write_json(output / "city_extraction.json", extraction)
     if not store.facts(CITY_SOURCE):
         raise ValueError("还没有 01 事实，请加 --extract 从城市报告抽取")
@@ -225,10 +271,12 @@ def check_dataset(root: Path, output: Path, extract: bool) -> dict:
     }
     expected_city, city_locators = city_expected(city_source)
     expected_daily, daily_locators = daily_expected(daily_source)
-    if len(expected_city) != 100 or len(expected_daily) != 2542:
+    expected_rules = checked_rules(load_expectations(), "same-db")
+    city_rules, daily_rules = expected_rules["01"], expected_rules["03"]
+    if len(expected_city) != city_rules["rows"] or len(expected_daily) != daily_rules["rows"]:
         raise ValueError("独立原文核对得出的预期行数不符合任务书")
-    if sum(value is None for row in expected_daily for value in row) != 330:
-        raise ValueError("逐日原文的空格数与任务书的 330 不一致")
+    if sum(value is None for row in expected_daily for value in row) != daily_rules["expected_empty"]:
+        raise ValueError("逐日原文的空格数与验收配置不一致")
 
     results = {}
     database_sha256 = hashlib.sha256(store.path.read_bytes()).hexdigest()
@@ -240,9 +288,8 @@ def check_dataset(root: Path, output: Path, extract: bool) -> dict:
         previous = None
         timings = []
         for _ in range(2):
-            started = perf_counter()
             outcome = fill_workbook(store, source, template, output)
-            timings.append(round(perf_counter() - started, 3))
+            timings.append(outcome.pop("fill_seconds"))
             audit = verify_workbook(output / workbook, expected, width)
             trace = verify_trace(store, output / trace_file, locators, width)
             current = {**outcome, **audit}
@@ -267,7 +314,8 @@ def check_dataset(root: Path, output: Path, extract: bool) -> dict:
     write_json(output / "source_audit.json", report)
     if any(
         item["differences"] or item["rows"] != rows or item["columns"] != columns
-        for item, rows, columns in ((results["01"], 100, 5), (results["03"], 2542, 7))
+        for item, rows, columns in ((results["01"], city_rules["rows"], 5),
+                                    (results["03"], daily_rules["rows"], 7))
     ):
         raise ValueError(f"存在原文核对差异，详见 {output / 'source_audit.json'}")
     return report
@@ -277,10 +325,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="用测试集原文独立核对 01 和 03，输出本地审计记录")
     parser.add_argument("--root", type=Path, default=DATASET)
     parser.add_argument("--data-dir", type=Path, default=OUTPUT)
-    parser.add_argument("--extract", action="store_true", help="调用 DeepSeek 重新抽取 01 城市报告")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--extract", action="store_true", help="调用 DeepSeek 重新抽取 01 城市报告")
+    mode.add_argument("--archived-facts", type=Path, help="在空库重建历史事实，无网络调用")
     args = parser.parse_args()
     try:
-        report = check_dataset(args.root, args.data_dir, args.extract)
+        report = check_dataset(args.root, args.data_dir, args.extract, args.archived_facts)
     except (OSError, ValueError) as error:
         parser.exit(1, f"核对失败：{error}\n")
     print(json.dumps(report["scenarios"], ensure_ascii=False, indent=2))

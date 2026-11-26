@@ -1,0 +1,68 @@
+原工作区综合验收
+...........................................................              [100%]
+59 passed in 1.14s
+合成交付文件通过：/Users/adgainai6657/PycharmProjects/A23/backend/data/deliverables/demo
+合成 same-db 通过（同库重新填写并逐项比较）
+合成 rebuilt 通过（空库执行固定模型替身并重新入库）
+改数 | exit=1 | 01.cell_accuracy 预期 1，实际 0.5，检查 eval_report.json
+改数 pytest | exit=1 | F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_delivered_report_predicate[01-cell_accuracy] _______________
+
+case = '01', key = 'cell_accuracy'
+
+    @pytest.mark.parametrize("case,key", [
+        (case, key) for case, rules in load_expectations()["demo"].items() for key in rules
+    ])
+    def test_delivered_report_predicate(case, key):
+        directory = Path(os.getenv("A23_TEST_REPORT_DIR", str(DEMO_DELIVERY)))
+        rules = load_expectations()["demo"]
+        reports = checked_outputs(directory, "reference", require_database=False)
+>       assert not (failures := check(reports, {case: {key: rules[case][key]}})), "\n".join(failures)
+E       AssertionError: 01.cell_accuracy 预期 1，实际 0.5，检查 eval_report.json
+E       assert not ['01.cell_accuracy 预期 1，实际 0.5，检查 eval_report.json']
+
+backend/test_a23.py:391: AssertionError
+=========================== short test summary info ============================
+FAILED backend/test_a23.py::test_delivered_report_predicate[01-cell_accuracy]
+1 failed, 58 deselected in 0.17s
+改键 | exit=1 | 01.rows 预期 1，实际 None，检查 eval_report.json
+删报告 | exit=1 | 验收失败：01 缺少 eval_report.json，预期文件存在，实际缺失（/var/folders/8t/1t796b4j16n_qm7n5h3jpyx80000gn/T/a23-verify-vc2lsm2t/damage/eval_report.json）
+恢复 | exit=0 | 验收通过，共 13 条数值判据
+恢复 pytest | exit=0 | .                                                                        [100%]
+1 passed, 58 deselected in 0.15s
+公开样本交付文件通过：same-db.zip（核对报告与工作簿）
+公开样本交付文件通过：rebuilt-history.zip（核对报告与工作簿）
+source same-db 通过（19 条判据）：/tmp/a23-delivery.O9k2ae/source-same
+source rebuilt 通过（19 条判据）：/tmp/a23-delivery.O9k2ae/source-rebuilt
+综合验收通过，耗时 2.97 秒
+
+仓库外干净 Clone 与启动
+Cloning into '/tmp/a23-final-clone.umPcf0/A23'...
+b011380f6db02f3ef7b411bd5678a8f69f225d2f
+✓ built in 209ms
+{"ok":true}
+clone_to_health_seconds=25
+59 passed in 1.09s
+综合验收通过，耗时 2.72 秒
+
+四格式双次解析
+2024年药品流通行业运行统计分析报告.txt 70 [0.02, 0.001]
+2023年文化和旅游发展统计公报.md 68 [0.001, 0.001]
+南京市2021~2024年国民经济和社会发展统计公报汇总.docx 1217 [0.035, 0.036]
+COVID-19全球数据集（节选）.xlsx 15088 [0.383, 0.381]
+bad.txt 400 无法读取 .txt 文件，请检查内容和格式
+bad.csv 400 不支持文件格式 .csv
+bad.docx 400 无法解析 .docx 文件，请检查文件是否损坏
+
+Chrome 合成链路
+01 prepared: browser 1 row, 5 cells, 100% card and row; B2 provenance in 0.002s
+01 download: xlsx received
+03 empty DB: upload, parse, ingest, 3 rows, 19 written, 2 blank, 100% correct, D3 trace and download
+Readable error: unavailable template
+
+Chrome 公开链路
+Public 01 run 1: 100 rows, 500 cells, 0 blanks; both rates 100%; B2 detail in 0.005s
+Public 01 run 2: 100 rows, 500 cells, 0 blanks; both rates 100%; B2 detail in 0.002s
+Public 03: 2542 rows, 17464 written, 330 blanks, F3 provenance Data row 499
+Readable errors: unfilled report, unknown document, disconnected backend

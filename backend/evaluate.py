@@ -49,7 +49,8 @@ def scoring_origin(filled: Path, content: bytes) -> dict:
     return {
         key: trace[key] for key in (
             "result_id", "run_id", "source_sha256", "template_sha256", "workbook_sha256",
-        )
+            "fill_seconds", "refusal_counts",
+        ) if key in trace
     }
 
 
@@ -83,7 +84,7 @@ def evaluate(
             actual_rows = actual.iter_rows(min_row=2, max_row=count + 1, max_col=width, values_only=True)
             expected_rows_iter = expected.iter_rows(min_row=2, max_row=count + 1, max_col=width, values_only=True)
             differences = []
-            correct = complete = allowed_empty = false_fills = missed = same_city = written = 0
+            correct = complete = allowed_empty = false_fills = missed = same_city = written = wrong = 0
             pairs = zip_longest(actual_rows, expected_rows_iter, fillvalue=(None,) * width)
             for row, (seen, target) in enumerate(pairs, 2):
                 complete += all(value is not None for value in seen)
@@ -100,12 +101,15 @@ def evaluate(
                         continue
                     false_fills += truth is None and value is not None
                     missed += truth is not None and value is None
+                    wrong += truth is not None and value is not None
                     decision = "误填" if truth is None else "漏填" if value is None else "值不符"
                     differences.append({"row": row, "column": column, "actual": value, "expected": truth, "decision": decision})
             total = width * count
             output = {
                 "doc": doc, "file": filled.name, "rows": actual.max_row - 1,
                 "cells_written": written, "cells_empty": total - written, "diff": differences,
+                "expected_empty": allowed_empty, "false_fills": false_fills, "missed": missed,
+                "wrong_values": wrong,
                 "basis": "reference-workbook",
                 "reference_sha256": sha256(reference_content).hexdigest(),
                 **identity,

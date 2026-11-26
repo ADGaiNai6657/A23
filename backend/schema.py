@@ -53,3 +53,4 @@ class ExtractResult(BaseModel):
     mode: Mode
     count: int
     kept: int
+    rejected: dict[str, int] = Field(default_factory=dict)
