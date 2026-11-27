@@ -18,3 +18,10 @@ dataset/测试集/
 .aws/
 .env.*
 !.env.example
+/docs/A23_项目双轨验收与差距分析.md
+/docs/双轨审计*复验.md
+/docs/双轨审计补全记录.md
+/docs/模块一与第六轮复验.md
+/docs/第七轮*复验.md
+/docs/第八轮*复验.md
+/docs/第九轮*复验.md
