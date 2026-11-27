@@ -653,7 +653,7 @@ function fillXlsxTemplate() {
           <p v-if="xlsxSelectedCell.source_sheet">来源 {{ xlsxSelectedCell.source_sheet }}!{{ xlsxSelectedCell.source_column }}{{ xlsxSelectedCell.source_row }}，原值 {{ xlsxSelectedCell.source_value ?? '空' }}</p>
           <p v-if="xlsxSelectedCell.reason_code === 'source_blank'">源表真空：该字段没有可用原值。</p>
           <div v-if="xlsxSelectedCell.conflicts?.length">
-            <p>来源冲突，以下候选均未采用：</p>
+            <p>{{ xlsxSelectedCell.reason_code === 'incompatible_value' ? '以下来源原值无法转换，已拒填：' : '来源冲突，以下候选均未采用：' }}</p>
             <ul><li v-for="(option, index) in xlsxSelectedCell.conflicts" :key="index">候选 {{ index + 1 }}：{{ option.value }}；{{ option.source_sheet }}!{{ option.source_column }}{{ option.source_row }}，原值 {{ option.source_value }}</li></ul>
           </div>
         </template>

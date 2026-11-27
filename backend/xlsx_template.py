@@ -1,6 +1,7 @@
 """Confirmed, auditable XLSX target mapping for the public 03 data shape."""
 
 import json
+from copy import copy
 from collections import OrderedDict, defaultdict
 from datetime import date, datetime
 from decimal import Decimal
@@ -12,7 +13,8 @@ from time import monotonic
 from uuid import uuid4
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.worksheet.cell_range import CellRange
 
 from fill_spec import COUNTRY_KEYS, DATE_KEYS, normalize, spreadsheet_key
 from filler import covid_rows
@@ -112,7 +114,57 @@ def validate_write_area(sheet, rows_count: int, header_count: int) -> str:
         elif 2 <= cell.row <= last_row and 1 <= cell.column <= width:
             kind = "公式" if cell.data_type == "f" else "批注" if cell.comment else "内容"
             raise ValueError(f"目标工作表「{sheet.title}」{cell.coordinate} 已有{kind}，位于预定写入范围 A2:G{last_row}")
+    if header_count == width - 1:
+        validate_column_rules(sheet)
     return f"A2:G{last_row}"
+
+
+def validate_column_rules(sheet) -> None:
+    """Check metadata that openpyxl does not shift with insert_cols."""
+    if sheet.tables or sheet.conditional_formatting or sheet.print_area:
+        raise ValueError(f"目标工作表「{sheet.title}」含表格、条件格式或打印区域，无法安全迁移列规则；请改用七列表头")
+    for validation in sheet.data_validations.dataValidation:
+        if validation.formula1 and not (validation.type == "list" and
+                                        validation.formula1.startswith('"') and
+                                        validation.formula1.endswith('"')):
+            raise ValueError(f"目标工作表「{sheet.title}」数据验证 {validation.sqref} 使用公式，无法安全迁移；请改用七列表头")
+        if validation.formula2:
+            raise ValueError(f"目标工作表「{sheet.title}」数据验证 {validation.sqref} 使用公式，无法安全迁移；请改用七列表头")
+        if any(area.max_col > 6 for area in validation.sqref.ranges):
+            raise ValueError(f"目标工作表「{sheet.title}」数据验证 {validation.sqref} 超出六列，无法安全迁移；请改用七列表头")
+    if sheet.auto_filter.ref:
+        area = CellRange(sheet.auto_filter.ref)
+        if (area.min_col, area.min_row, area.max_col) != (1, 1, 6) or sheet.auto_filter.filterColumn or sheet.auto_filter.sortState:
+            raise ValueError(f"目标工作表「{sheet.title}」自动筛选 {sheet.auto_filter.ref} 无法安全迁移；请改用七列表头")
+    for letter, dimension in sheet.column_dimensions.items():
+        index = dimension.index or letter
+        if not index.isalpha() or (dimension.min and dimension.max and dimension.min != dimension.max):
+            raise ValueError(f"目标工作表「{sheet.title}」列宽规则 {letter} 无法安全迁移；请改用七列表头")
+
+
+def shift_column_rules(sheet) -> None:
+    """Move six-column field metadata after inserting the date column."""
+    for validation in sheet.data_validations.dataValidation:
+        moved = []
+        for area in validation.sqref.ranges:
+            shifted = copy(area)
+            shifted.shift(col_shift=1)
+            moved.append(str(shifted))
+        validation.sqref = " ".join(moved)
+    if sheet.auto_filter.ref:
+        area = CellRange(sheet.auto_filter.ref)
+        area.max_col += 1
+        sheet.auto_filter.ref = str(area)
+    dimensions = list(sheet.column_dimensions.items())
+    sheet.column_dimensions.clear()
+    for letter, dimension in dimensions:
+        shifted = copy(dimension)
+        shifted.index = get_column_letter(column_index_from_string(letter) + 1)
+        if shifted.min:
+            shifted.min += 1
+        if shifted.max:
+            shifted.max += 1
+        sheet.column_dimensions[shifted.index] = shifted
 
 
 def safe_excel_number(value: Decimal) -> int | float | None:
@@ -235,6 +287,7 @@ def _fill_claimed(source: bytes, source_name: str, template: bytes, template_nam
         validate_write_area(sheet, len(rows), len(chosen["headers"]))
         if add_date:
             sheet.insert_cols(1)
+            shift_column_rules(sheet)
             sheet.cell(1, 1, "日期")
         def provenance_for(source_info, key):
             if not source_info:

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from openpyxl.utils import column_index_from_string
+from openpyxl.worksheet.datavalidation import DataValidation
 
 import main
 from unpack_dataset import unpack_dataset
@@ -270,3 +271,107 @@ def test_excess_precision_refused_with_original_value():
         assert revised["目标"]["F2"].value == by_field["每日检测数"]["value"] == 7
     finally:
         revised.close()
+
+
+def six_column_rules(*, formula=False):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "目标"
+    sheet.append([LABELS[key] for key in ("country", "continent", "gdp_per_capita",
+                                          "population", "每日检测数", "病例数")])
+    rule = DataValidation(type="list", formula1="=$H$1:$H$2" if formula else '"亚洲,欧洲"')
+    sheet.add_data_validation(rule)
+    rule.add("B2:B20")
+    sheet.auto_filter.ref = "A1:F20"
+    sheet.column_dimensions["A"].width = 31
+    sheet.column_dimensions["B"].width = 13
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def test_six_column_rules_follow_business_fields_after_insertion():
+    client = TestClient(main.app)
+    preview, report, content = mapped_upload(client, synthetic_source(), six_column_rules())
+    assert preview.status_code == 200
+    assert report["cells_written"] == 7
+    revised = load_workbook(BytesIO(content))
+    try:
+        sheet = revised["目标"]
+        assert sheet["A1"].value == "日期" and sheet["B1"].value == "国家/地区"
+        assert sheet["C1"].value == "大洲" and sheet["C2"].value == "亚洲"
+        assert str(sheet.data_validations.dataValidation[0].sqref) == "C2:C20"
+        assert sheet.auto_filter.ref == "A1:G20"
+        assert sheet.column_dimensions["B"].width == 31
+        assert sheet.column_dimensions["C"].width == 13
+    finally:
+        revised.close()
+
+
+def test_six_column_formula_validation_requires_seven_headers():
+    preview, report, content = mapped_upload(
+        TestClient(main.app), synthetic_source(), six_column_rules(formula=True))
+    assert preview.status_code == 400
+    assert "目标" in preview.json()["detail"]
+    assert "B2:B20" in preview.json()["detail"]
+    assert "七列表头" in preview.json()["detail"]
+    assert report is content is None
+
+
+@pytest.mark.parametrize("values,code,expected", [
+    ((None, "未统计"), "incompatible_value", [(3, "未统计")]),
+    ((None, None), "source_blank", []),
+    (("待核", "未统计"), "incompatible_value", [(2, "待核"), (3, "未统计")]),
+    ((None, 0), None, []),
+])
+def test_refusal_provenance_points_to_offending_cell_in_both_entries(tmp_path, values, code, expected):
+    from filler import fill_workbook
+    from parsers import parse_document
+    from store import Store
+    from fill_spec import COVID_OUTPUT
+
+    source_book = Workbook()
+    sheet = source_book.active
+    sheet.title = "Data"
+    sheet.append([LABELS[key] for key in ("date", "country", "continent", "gdp_per_capita",
+                                          "population", "每日检测数", "病例数")])
+    for value in values:
+        sheet.append([date(2020, 7, 1), "甲国", "亚洲", 123, 1000, 7, value])
+    source_path = tmp_path / "源.xlsx"
+    source_book.save(source_path)
+    source_book.close()
+    source = source_path.read_bytes()
+
+    preview, report, content = mapped_upload(TestClient(main.app), source, seven_column_template())
+    assert preview.status_code == 200
+    item = next(cell for cell in report["cells"] if cell["field"] == "病例数")
+    assert item.get("reason_code") == code
+    if code is None:
+        assert item["value"] == 0
+    source_row = expected[0][0] if expected else (3 if code is None else 2)
+    assert item["source_row"] == source_row
+    if expected:
+        assert item["source_sheet"] == "Data" and item["source_column"] == "G"
+        assert item["source_value"] == expected[0][1]
+        assert [(entry["source_row"], entry["source_value"]) for entry in item["conflicts"]] == expected
+    target = load_workbook(BytesIO(content))
+    assert target["目标"]["G2"].value == (0 if code is None else None)
+    target.close()
+
+    fixed_template = tmp_path / "模板.xlsx"
+    fixed_book = Workbook()
+    fixed_book.active.append([LABELS[key] for key in ("date", "country", "continent", "gdp_per_capita",
+                                                        "population", "每日检测数", "病例数")])
+    fixed_book.save(fixed_template)
+    fixed_book.close()
+    saved = Store(tmp_path / "source.db")
+    saved.save(parse_document(source, source_path.name), source)
+    fill_workbook(saved, source_path.name, fixed_template, tmp_path)
+    fixed_report = json.loads((tmp_path / "fill_report_covid19.json").read_text())
+    fixed_item = next(cell for cell in fixed_report["cells"] if cell["column"] == 7)
+    assert fixed_item["source"]["locator"] == {"sheet": "Data", "row": source_row}
+    assert fixed_item.get("reason_code") == code
+    fixed_output = load_workbook(tmp_path / COVID_OUTPUT)
+    assert fixed_output.active["G2"].value == (0 if code is None else None)
+    fixed_output.close()

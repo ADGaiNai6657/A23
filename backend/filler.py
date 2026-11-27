@@ -279,13 +279,21 @@ def covid_rows(content: bytes, blocks: list[dict], headers: tuple[str, ...]) -> 
                 if (value := covid_value(key, raw)) is not None
             ]
             if not options:
-                candidates_have_value = any(
-                    raw is not None and str(raw).strip() for record, _ in records for _, raw in record[key]
-                )
-                values.append(cell(
-                    None, "匹配的来源行在该字段没有可用值", records[0][1],
-                    "incompatible_value" if candidates_have_value else "source_blank",
-                ))
+                invalid = [
+                    {"value": raw, "source": {**source, "field": field}}
+                    for record, source in records for field, raw in record[key]
+                    if raw is not None and str(raw).strip()
+                ]
+                if invalid:
+                    item = cell(None, "来源字段含不可转换的值，已拒填", invalid[0]["source"],
+                                "incompatible_value")
+                    item["conflicts"] = invalid
+                else:
+                    blank = next(({"source": {**source, "field": field}}
+                                  for record, source in records for field, _ in record[key]), None)
+                    item = cell(None, "匹配的来源行在该字段没有可用值",
+                                blank["source"] if blank else records[0][1], "source_blank")
+                values.append(item)
                 continue
             chosen, reason = choose_value(options)
             item = cell(chosen["value"] if chosen else None, reason, chosen["source"] if chosen else None)
