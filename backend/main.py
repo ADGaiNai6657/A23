@@ -19,6 +19,9 @@ from evaluate import evaluate
 from extractor import extract_document
 from fill_spec import CITY_OUTPUT, COVID_OUTPUT, REFERENCE_FILES, REPORT_FILES
 from filler import block_digest, fill_workbook, resolve_facts
+import operations
+import air_quality
+import xlsx_template
 from parsers import leaf_name, parse_document
 from schema import ExtractResult, FactDecisionRequest, FillRequest, ParsedDoc
 from store import Store
@@ -86,6 +89,92 @@ def extract(file: Annotated[UploadFile, File()], metrics: Annotated[str, Form()]
         return extract_document(file.file.read(), file.filename or "", chosen, store)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
+
+
+@app.post("/operations/preview")
+def preview_operations(file: Annotated[UploadFile, File()],
+                       instruction: Annotated[str, Form()]) -> dict:
+    try:
+        return operations.preview(file.file.read(), leaf_name(file.filename or ""), instruction)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except Exception as error:
+        logger.exception("操作预览失败")
+        raise HTTPException(400, "无法解析文件或生成操作预览，请核对文件格式和指令") from error
+
+
+@app.post("/operations")
+def apply_operations(file: Annotated[UploadFile, File()],
+                     plan_id: Annotated[str, Form()]) -> dict:
+    try:
+        return operations.execute(file.file.read(), leaf_name(file.filename or ""), plan_id)
+    except ValueError as error:
+        raise HTTPException(409 if "版本不符" in str(error) or "已失效" in str(error) else 400, str(error)) from error
+    except Exception as error:
+        logger.exception("文档操作失败")
+        raise HTTPException(400, "文件处理失败，未生成结果副本，请核对目标位置和文件格式") from error
+
+
+@app.get("/operations/files/{result_id}")
+def operation_file(result_id: str) -> Response:
+    result = operations.download(result_id)
+    if result is None:
+        raise HTTPException(404, "操作结果不存在或已过期，请重新执行")
+    media_type = ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  if result["name"].lower().endswith(".docx")
+                  else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return Response(result["content"], media_type=media_type,
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(result['name'])}"})
+
+
+@app.post("/templates/inspect")
+def inspect_template(source: Annotated[UploadFile, File()], template: Annotated[UploadFile, File()]) -> dict:
+    try:
+        return air_quality.inspect(source.file.read(), template.file.read())
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except Exception as error:
+        logger.exception("空气质量模板预览失败")
+        raise HTTPException(400, "无法读取空气质量源表或 Word 模板，请检查文件格式") from error
+
+
+@app.post("/templates/fill")
+def fill_template(source: Annotated[UploadFile, File()], template: Annotated[UploadFile, File()],
+                  plan_id: Annotated[str, Form()]) -> dict:
+    try:
+        return air_quality.fill(source.file.read(), template.file.read(), plan_id)
+    except ValueError as error:
+        raise HTTPException(409 if "版本" in str(error) or "失效" in str(error) else 400, str(error)) from error
+    except Exception as error:
+        logger.exception("空气质量模板填写失败")
+        raise HTTPException(400, "模板处理失败，未生成下载副本") from error
+
+
+@app.post("/templates/xlsx/inspect")
+def inspect_xlsx_template(source: Annotated[UploadFile, File()], template: Annotated[UploadFile, File()]) -> dict:
+    try:
+        return xlsx_template.inspect(source.file.read(), leaf_name(source.filename or ""),
+                                     template.file.read(), leaf_name(template.filename or ""))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except Exception as error:
+        logger.exception("XLSX 模板预览失败")
+        raise HTTPException(400, "无法读取源 XLSX 或目标模板") from error
+
+
+@app.post("/templates/xlsx/fill")
+def fill_xlsx_template(source: Annotated[UploadFile, File()], template: Annotated[UploadFile, File()],
+                       plan_id: Annotated[str, Form()], sheet: Annotated[str, Form()],
+                       mapping: Annotated[str, Form()]) -> dict:
+    try:
+        return xlsx_template.fill(source.file.read(), leaf_name(source.filename or ""),
+                                  template.file.read(), leaf_name(template.filename or ""),
+                                  plan_id, sheet, mapping)
+    except ValueError as error:
+        raise HTTPException(409 if "版本" in str(error) or "失效" in str(error) else 400, str(error)) from error
+    except Exception as error:
+        logger.exception("XLSX 模板填写失败")
+        raise HTTPException(400, "XLSX 模板处理失败，未生成下载副本") from error
 
 
 @app.get("/facts")

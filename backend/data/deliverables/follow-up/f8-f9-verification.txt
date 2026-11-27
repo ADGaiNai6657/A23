@@ -1,0 +1,35 @@
+更新审计的原始 B2 探针
+net-increase kept= 1 B2= None reason= metric_mismatch detected_scope= None
+numeric-year-comparison kept= 1 B2= None reason= metric_mismatch detected_scope= None
+changes-to-absolute kept= 1 B2= 100 reason= None detected_scope= None
+first-three-quarters kept= 1 B2= None reason= period_or_scope detected_scope= 前三个季度
+as-of-with-day kept= 1 B2= None reason= period_or_scope detected_scope= 截至9月30日
+annual-without-partial-value kept= 1 B2= 100 reason= None detected_scope= None
+annual-with-comma-in-parens kept= 1 B2= 100 reason= None detected_scope= None
+year-valid kept= 1 B2= 100 reason= None detected_scope= None
+..............................................                           [100%]
+46 passed, 6 deselected in 1.16s
+
+本轮前端构建与综合验收
+✓ built in 240ms
+No broken requirements found.
+验收通过，共 19 条数值判据
+126 passed in 40.12s
+公开样本交付文件通过：source/same-db.zip（核对报告与工作簿）
+公开样本交付文件通过：source/rebuilt-history.zip（核对报告与工作簿）
+公开样本交付文件通过：follow-up/same-db.zip（核对报告与工作簿）
+公开样本交付文件通过：follow-up/city-online.zip（报告、工作簿、凭证和逐批离线重放；包内无数据库）
+source same-db 通过（19 条判据）：/tmp/a23-f8-f9.Mv93Hn/final-same
+source rebuilt/online 通过（19 条判据）：/tmp/a23-audit-fix.MBSRG2/city-online
+综合验收通过，耗时 42.35 秒
+
+TXT 既有响应离线重放
+[{"run_id": "91edd9ee75624f7c8ba8408b1fc82cd2", "doc": "2024年药品流通行业运行统计分析报告.txt", "mode": "list", "count": 24, "kept": 24, "rejected": {}, "traceable": 24, "attempts": 3, "model_calls": 0, "seconds": 0.006}, {"run_id": "8cac70361dd2455bb1d55cfe6750fd85", "doc": "2024年药品流通行业运行统计分析报告.txt", "mode": "list", "count": 28, "kept": 28, "rejected": {}, "traceable": 28, "attempts": 3, "model_calls": 0, "seconds": 0.002}]
+两轮共同事实 6 条，差异见 /tmp/a23-f8-f9.Mv93Hn/txt-replay/comparison.json
+
+本地提交 26eba51 的独立克隆
+Cloning into '/tmp/a23-f8-f9.Mv93Hn/committed'...
+26eba51
+105 passed in 42.50s
+综合验收通过，耗时 44.59 秒
+clone_to_verify_seconds=72

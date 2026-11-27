@@ -37,8 +37,16 @@ const refusalLabels = {
   period_or_scope: '期次或统计口径不符',
   metric_mismatch: '原文指标不符',
   source_blank: '原文缺值', conflict: '来源冲突',
+  goal: '目标值', forecast: '预测值',
+}
+function refusalLabel(key) {
+  return refusalLabels[key] ?? `其他拒填（${key}）`
 }
 const connections = { checking: '正在连接', online: '后端在线', offline: '后端未连接' }
+const operationLabels = {
+  docx_replace: '替换文字', docx_format: '段落排版', docx_extract: '提取原文',
+  xlsx_set: '修改单元格', xlsx_format: '设置格式', xlsx_extract: '提取原文',
+}
 
 const kind = ref('city')
 const layout = computed(() => layouts[kind.value])
@@ -58,6 +66,26 @@ const resultHeading = ref(null)
 const row = ref(2)
 const column = ref(1)
 const detail = ref(null)
+const operationFile = ref(null)
+const operationInstruction = ref('')
+const operationPlan = ref(null)
+const operationResult = ref(null)
+const airSource = ref(null)
+const airTemplate = ref(null)
+const airPlan = ref(null)
+const airResult = ref(null)
+const xlsxSource = ref(null)
+const xlsxTarget = ref(null)
+const xlsxPlan = ref(null)
+const xlsxResult = ref(null)
+const xlsxSheet = ref('')
+const xlsxMapping = ref({})
+const xlsxRow = ref(2)
+const xlsxColumn = ref(1)
+const xlsxSheetInfo = computed(() => xlsxPlan.value?.target_sheets.find(item => item.name === xlsxSheet.value))
+const xlsxSelectedCell = computed(() => xlsxResult.value?.cells.find(
+  item => item.row === Number(xlsxRow.value) && item.column === Number(xlsxColumn.value),
+))
 
 async function checkHealth() {
   try {
@@ -245,6 +273,108 @@ function inspectCell() {
 function percent(value) {
   return value == null ? '—' : `${(value * 100).toFixed(2)}%`
 }
+
+function chooseOperationFile(event) {
+  operationFile.value = event.target.files[0] ?? null
+  operationPlan.value = operationResult.value = null
+  feedback.value.operation = null
+}
+
+function changeOperationInstruction() {
+  operationPlan.value = operationResult.value = null
+  feedback.value.operation = null
+}
+
+function previewOperation() {
+  if (!operationFile.value || !operationInstruction.value.trim()) {
+    feedback.value.operation = { error: true, text: '请选择 DOCX 或 XLSX，并输入操作指令。' }
+    return
+  }
+  if (!/\.(docx|xlsx)$/i.test(operationFile.value.name)) {
+    feedback.value.operation = { error: true, text: '自然语言操作仅支持 DOCX 和 XLSX。' }
+    return
+  }
+  if (!window.confirm('预览需要把文档内容和指令发送到 DeepSeek，可能产生 API 用量。继续吗？')) return
+  operationPlan.value = operationResult.value = null
+  return run('operation', '正在解析指令和校验目标', async () => {
+    operationPlan.value = await api.operationPreview(operationFile.value, operationInstruction.value)
+    feedback.value.operation = { text: '操作预览已生成，请核对每项目标和预期修改。' }
+  })
+}
+
+function executeOperation() {
+  if (!operationFile.value || !operationPlan.value) return
+  operationResult.value = null
+  return run('operation', '正在执行已确认的操作', async () => {
+    operationResult.value = await api.operationExecute(operationFile.value, operationPlan.value.plan_id)
+    operationPlan.value = null
+    feedback.value.operation = { text: '操作已完成。' }
+  })
+}
+
+function chooseAirFile(event, kind) {
+  if (kind === 'source') airSource.value = event.target.files[0] ?? null
+  else airTemplate.value = event.target.files[0] ?? null
+  airPlan.value = airResult.value = null
+  feedback.value.air = null
+}
+
+function inspectAirTemplate() {
+  if (!airSource.value || !airTemplate.value) return
+  airPlan.value = airResult.value = null
+  return run('air', '正在读取源表与模板', async () => {
+    airPlan.value = await api.templateInspect(airSource.value, airTemplate.value)
+    feedback.value.air = { text: '已核对时间、城市、表头和行数，请确认填写。' }
+  })
+}
+
+function fillAirTemplate() {
+  if (!airPlan.value || !airSource.value || !airTemplate.value) return
+  airResult.value = null
+  return run('air', '正在填写空气质量 Word 模板', async () => {
+    airResult.value = await api.templateFill(airSource.value, airTemplate.value, airPlan.value.plan_id)
+    airPlan.value = null
+    feedback.value.air = { text: '模板已填写，请下载副本并核查逐格来源。' }
+  })
+}
+
+function chooseXlsxFile(event, kind) {
+  if (kind === 'source') xlsxSource.value = event.target.files[0] ?? null
+  else xlsxTarget.value = event.target.files[0] ?? null
+  xlsxPlan.value = xlsxResult.value = null
+  feedback.value.xlsx = null
+}
+
+function selectXlsxSheet() {
+  xlsxMapping.value = Object.fromEntries((xlsxSheetInfo.value?.headers ?? []).map(
+    item => [item.column, item.suggested ?? ''],
+  ))
+}
+
+function inspectXlsxTemplate() {
+  if (!xlsxSource.value || !xlsxTarget.value) return
+  xlsxPlan.value = xlsxResult.value = null
+  return run('xlsx', '正在检查目标表头', async () => {
+    xlsxPlan.value = await api.xlsxTemplateInspect(xlsxSource.value, xlsxTarget.value)
+    xlsxSheet.value = xlsxPlan.value.target_sheets[0]?.name ?? ''
+    selectXlsxSheet()
+    feedback.value.xlsx = { text: '请核对目标工作表和每一列的字段映射，再确认填写。' }
+  })
+}
+
+function fillXlsxTemplate() {
+  if (!xlsxPlan.value || !xlsxSource.value || !xlsxTarget.value) return
+  xlsxResult.value = null
+  return run('xlsx', '正在填写上传的 XLSX 模板', async () => {
+    xlsxResult.value = await api.xlsxTemplateFill(
+      xlsxSource.value, xlsxTarget.value, xlsxPlan.value.plan_id, xlsxSheet.value, xlsxMapping.value,
+    )
+    xlsxPlan.value = null
+    xlsxRow.value = 2
+    xlsxColumn.value = 1
+    feedback.value.xlsx = { text: '填写完成。请下载副本并按行列查看逐格来源。' }
+  })
+}
 </script>
 
 <template>
@@ -388,6 +518,139 @@ function percent(value) {
       </section>
     </div>
 
+    <section class="panel operation-panel" aria-labelledby="operation-heading">
+      <header class="panel-heading">
+        <span class="panel-icon" aria-hidden="true"><span class="icon icon-document"></span></span>
+        <div>
+          <h2 id="operation-heading">自然语言操作</h2>
+          <p>上传 DOCX 或 XLSX，用一句中文指令编辑、排版或提取原文。</p>
+        </div>
+      </header>
+      <form class="operation-form" @submit.prevent="previewOperation">
+        <fieldset :disabled="Boolean(pending)">
+          <label class="field" for="operation-file">
+            <span>操作文件</span>
+            <input id="operation-file" type="file" accept=".docx,.xlsx" required @change="chooseOperationFile">
+          </label>
+          <label class="field" for="operation-instruction">
+            <span>中文指令</span>
+            <textarea id="operation-instruction" v-model="operationInstruction" rows="3" required
+              @input="changeOperationInstruction"
+              placeholder="例如：把第一段里的‘试行’改成‘正式’，然后把第一段加粗并居中。"></textarea>
+          </label>
+          <button class="button button-primary" type="submit">识别并预览</button>
+        </fieldset>
+      </form>
+      <p class="feedback">预览会调用 DeepSeek。执行前请核对目标位置和修改内容。</p>
+      <p v-if="feedback.operation?.error" class="feedback feedback-error" role="alert">{{ feedback.operation.text }}</p>
+      <p v-else class="feedback" role="status">{{ pending?.area === 'operation' ? `${pending.label}…` : feedback.operation?.text }}</p>
+
+      <div v-if="operationPlan" class="operation-review">
+        <h3>待确认的操作</h3>
+        <ol>
+          <li v-for="item in operationPlan.operations" :key="item.index">
+            <strong>{{ item.location }}</strong> · {{ operationLabels[item.type] ?? item.type }}
+            <p>原内容 {{ item.before ?? '空' }}</p>
+            <p>预期结果 {{ item.after ?? '空' }}</p>
+          </li>
+        </ol>
+        <button class="button button-primary" type="button" :disabled="Boolean(pending)" @click="executeOperation">
+          确认并执行
+        </button>
+      </div>
+
+      <div v-if="operationResult" class="operation-review">
+        <h3>执行结果</h3>
+        <ol>
+          <li v-for="item in operationResult.operations" :key="item.index">
+            <strong>{{ item.location }}</strong> · {{ item.after ?? '空' }}
+            <blockquote v-if="item.quote">原文 {{ item.quote }}</blockquote>
+          </li>
+        </ol>
+        <a v-if="operationResult.result_id" class="button button-secondary"
+          :href="api.operationDownload(operationResult.result_id)" download>下载文件副本</a>
+      </div>
+    </section>
+
+    <section class="panel operation-panel" aria-labelledby="air-heading">
+      <header class="panel-heading">
+        <span class="panel-icon" aria-hidden="true"><span class="icon icon-document"></span></span>
+        <div>
+          <h2 id="air-heading">空气质量 Word 模板填写</h2>
+          <p>上传公开监测 XLSX 和空白 DOCX，按模板段落填写德州、潍坊、临沂三市 2025-11-25 09:00 数据。</p>
+        </div>
+      </header>
+      <form class="operation-form" @submit.prevent="inspectAirTemplate">
+        <fieldset :disabled="Boolean(pending)">
+          <label class="field"><span>监测数据 XLSX</span><input type="file" accept=".xlsx" required @change="chooseAirFile($event, 'source')"></label>
+          <label class="field"><span>空白 Word 模板</span><input type="file" accept=".docx" required @change="chooseAirFile($event, 'template')"></label>
+          <button class="button button-primary" type="submit">预览模板映射</button>
+        </fieldset>
+      </form>
+      <p v-if="feedback.air?.error" class="feedback feedback-error" role="alert">{{ feedback.air.text }}</p>
+      <p v-else class="feedback" role="status">{{ pending?.area === 'air' ? `${pending.label}…` : feedback.air?.text }}</p>
+      <div v-if="airPlan" class="operation-review">
+        <h3>待确认的填写计划</h3>
+        <p>监测时间 {{ airPlan.period }}；字段映射 {{ JSON.stringify(airPlan.source_columns) }}</p>
+        <ol><li v-for="item in airPlan.tables" :key="item.city">{{ item.city }}：源表 {{ item.source_rows }} 行，模板 {{ item.template_rows }} 行，需增加 {{ item.added_rows }} 行</li></ol>
+        <button class="button button-primary" type="button" :disabled="Boolean(pending)" @click="fillAirTemplate">确认并填写副本</button>
+      </div>
+      <div v-if="airResult" class="operation-review">
+        <h3>填写结果</h3>
+        <p>{{ airResult.cells.length }} 格已记录来源；其中 {{ airResult.cells.filter(cell => cell.source_missing).length }} 格源值为缺失标记。</p>
+        <a class="button button-secondary" :href="api.operationDownload(airResult.result_id)" download>下载 Word 副本</a>
+        <details><summary>逐格来源（工作表、行列、原值）</summary>
+          <ol><li v-for="cell in airResult.cells" :key="`${cell.table}-${cell.row}-${cell.column}`">表 {{ cell.table }} {{ cell.city }} 第 {{ cell.row }} 行第 {{ cell.column }} 列 {{ cell.field }} = {{ cell.value }}；{{ cell.source_sheet }}!{{ cell.source_column }}{{ cell.source_row }}，原值 {{ cell.source_value ?? '空' }}{{ cell.source_missing ? '（缺失标记）' : '' }}</li></ol>
+        </details>
+      </div>
+    </section>
+
+    <section class="panel operation-panel" aria-labelledby="xlsx-heading">
+      <header class="panel-heading">
+        <span class="panel-icon" aria-hidden="true"><span class="icon icon-document"></span></span>
+        <div>
+          <h2 id="xlsx-heading">上传 XLSX 目标模板</h2>
+          <p>以 03 逐日统计字段为首版范围，上传源表和目标模板，确认工作表及字段映射后生成副本。</p>
+        </div>
+      </header>
+      <form class="operation-form" @submit.prevent="inspectXlsxTemplate">
+        <fieldset :disabled="Boolean(pending)">
+          <label class="field"><span>逐日统计源 XLSX</span><input type="file" accept=".xlsx" required @change="chooseXlsxFile($event, 'source')"></label>
+          <label class="field"><span>目标 XLSX 模板</span><input type="file" accept=".xlsx" required @change="chooseXlsxFile($event, 'target')"></label>
+          <button class="button button-primary" type="submit">预览工作表与表头</button>
+        </fieldset>
+      </form>
+      <p v-if="feedback.xlsx?.error" class="feedback feedback-error" role="alert">{{ feedback.xlsx.text }}</p>
+      <p v-else class="feedback" role="status">{{ pending?.area === 'xlsx' ? `${pending.label}…` : feedback.xlsx?.text }}</p>
+      <div v-if="xlsxPlan" class="operation-review">
+        <h3>确认目标字段映射</h3>
+        <p>源工作表：{{ xlsxPlan.source_sheets.map(item => item.name).join('、') }}</p>
+        <label class="field"><span>目标工作表</span><select v-model="xlsxSheet" @change="selectXlsxSheet">
+          <option v-for="item in xlsxPlan.target_sheets" :key="item.name" :value="item.name">{{ item.name }}</option>
+        </select></label>
+        <p v-if="xlsxSheetInfo?.headers.length === 6">目标模板没有日期列，填写时会在最前面插入「日期」。</p>
+        <div v-for="item in xlsxSheetInfo?.headers ?? []" :key="item.column" class="field">
+          <label :for="`xlsx-map-${item.column}`">{{ item.column }} 列「{{ item.label || '空表头' }}」映射到</label>
+          <select :id="`xlsx-map-${item.column}`" v-model="xlsxMapping[item.column]">
+            <option value="">请选择字段</option>
+            <option v-for="field in xlsxPlan.fields" :key="field.key" :value="field.key">{{ field.label }}</option>
+          </select>
+        </div>
+        <button class="button button-primary" type="button" :disabled="Boolean(pending)" @click="fillXlsxTemplate">确认映射并填写</button>
+      </div>
+      <div v-if="xlsxResult" class="operation-review">
+        <h3>目标 XLSX 填写结果</h3>
+        <p>{{ xlsxResult.sheet }}：{{ xlsxResult.rows }} 行，{{ xlsxResult.cells_written }} 格已填，{{ xlsxResult.cells_empty }} 格保持真空。</p>
+        <a class="button button-secondary" :href="api.operationDownload(xlsxResult.result_id)" download>下载 XLSX 副本</a>
+        <div class="operation-form">
+          <label class="field"><span>行号</span><input v-model.number="xlsxRow" type="number" min="2"></label>
+          <label class="field"><span>列号</span><input v-model.number="xlsxColumn" type="number" min="1" max="7"></label>
+        </div>
+        <p v-if="xlsxSelectedCell">{{ xlsxResult.sheet }} 第 {{ xlsxSelectedCell.row }} 行第 {{ xlsxSelectedCell.column }} 列「{{ xlsxSelectedCell.field }}」：{{ xlsxSelectedCell.value ?? '真空格' }}；{{ xlsxSelectedCell.reason }}；来源 {{ xlsxSelectedCell.source_sheet }}!{{ xlsxSelectedCell.source_column }}{{ xlsxSelectedCell.source_row }}，原值 {{ xlsxSelectedCell.source_value ?? '空' }}</p>
+        <p v-else>请输入结果范围内的行列号查看逐格来源。</p>
+      </div>
+    </section>
+
     <section class="panel results" aria-labelledby="result-heading">
       <header class="panel-heading result-header">
         <span class="panel-icon" aria-hidden="true"><span class="icon icon-result"></span></span>
@@ -419,7 +682,7 @@ function percent(value) {
         </div>
         <p v-else class="report-empty">{{ result.score_failed ? '本次自检生成失败，请检查参考表和核对材料。' : '本次填写暂无匹配的自检报告。' }}</p>
         <p v-if="report && Object.keys(report.refusal_counts ?? {}).length" class="report-empty">
-          拒填分类：{{ Object.entries(report.refusal_counts).map(([key, count]) => `${refusalLabels[key]} ${count} 格`).join('、') }}
+          拒填分类：{{ Object.entries(report.refusal_counts).map(([key, count]) => `${refusalLabel(key)} ${count} 格`).join('、') }}
         </p>
 
         <div class="trace">

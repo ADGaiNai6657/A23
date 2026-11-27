@@ -30,6 +30,21 @@ function upload(path, file, metrics) {
   return send(path, { method: 'POST', body })
 }
 
+function operationUpload(path, file, fields) {
+  const body = new FormData()
+  body.append('file', file)
+  for (const [key, value] of Object.entries(fields)) body.append(key, value)
+  return send(path, { method: 'POST', body })
+}
+
+function templateUpload(path, source, template, planId) {
+  const body = new FormData()
+  body.append('source', source)
+  body.append('template', template)
+  if (planId) body.append('plan_id', planId)
+  return send(path, { method: 'POST', body })
+}
+
 function params(values) {
   return new URLSearchParams(values).toString()
 }
@@ -48,4 +63,19 @@ export const api = {
   reports: (doc, file, resultId) => send('/reports?' + params({ doc, file, ...(resultId ? { result_id: resultId } : {}) })),
   cell: (doc, file, row, column, resultId) => send('/cells?' + params({ doc, file, row, column, result_id: resultId })),
   download: (name, resultId) => '/files?' + params({ name, result_id: resultId }),
+  operationPreview: (file, instruction) => operationUpload('/operations/preview', file, { instruction }),
+  operationExecute: (file, planId) => operationUpload('/operations', file, { plan_id: planId }),
+  operationDownload: (resultId) => `/operations/files/${encodeURIComponent(resultId)}`,
+  templateInspect: (source, template) => templateUpload('/templates/inspect', source, template),
+  templateFill: (source, template, planId) => templateUpload('/templates/fill', source, template, planId),
+  xlsxTemplateInspect: (source, template) => templateUpload('/templates/xlsx/inspect', source, template),
+  xlsxTemplateFill: (source, template, planId, sheet, mapping) => {
+    const body = new FormData()
+    body.append('source', source)
+    body.append('template', template)
+    body.append('plan_id', planId)
+    body.append('sheet', sheet)
+    body.append('mapping', JSON.stringify(mapping))
+    return send('/templates/xlsx/fill', { method: 'POST', body })
+  },
 }

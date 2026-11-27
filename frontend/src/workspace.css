@@ -65,12 +65,13 @@ body {
 #app { min-block-size: 100vh; }
 
 h1, h2, p, dl, dd, blockquote { margin: 0; }
-button, input { font: inherit; }
+button, input, textarea { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
+textarea:focus-visible,
 .workspace:focus-visible,
 #result-heading:focus-visible {
   outline: 3px solid var(--focus);
@@ -211,6 +212,34 @@ input:focus-visible,
   border-radius: 1.25rem;
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+.operation-panel { margin-block-start: 1.5rem; }
+.operation-form fieldset { display: grid; gap: 1rem; }
+.operation-form textarea {
+  inline-size: 100%;
+  min-block-size: 5rem;
+  padding: .7rem;
+  border: 1px solid var(--field-line);
+  border-radius: .5rem;
+  background: var(--surface);
+  color: var(--text);
+  resize: vertical;
+}
+.operation-review {
+  margin-block-start: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: .75rem;
+  background: var(--surface-subtle);
+}
+.operation-review h3 { margin: 0; font-size: 1rem; }
+.operation-review ol { padding-inline-start: 1.4rem; }
+.operation-review li { margin-block: .65rem; overflow-wrap: anywhere; }
+.operation-review blockquote {
+  margin-block-start: .35rem;
+  padding-inline-start: .7rem;
+  border-inline-start: 3px solid var(--accent);
 }
 
 .panel-input, .panel-fill {
@@ -375,7 +404,7 @@ fieldset {
   font-weight: 650;
 }
 
-.field input {
+.field input, .field select {
   inline-size: 100%;
   min-block-size: 2.75rem;
   padding: .52rem .72rem;
