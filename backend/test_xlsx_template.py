@@ -7,11 +7,12 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string
 
 import main
 from unpack_dataset import unpack_dataset
+from xlsx_template import LABELS
 
 ARCHIVE = Path(__file__).resolve().parents[1] / "dataset/测试集.zip"
 
@@ -58,6 +59,10 @@ def check_report_against_download(report, content, source):
     try:
         sheet = downloaded[report["sheet"]]
         assert sheet.max_row == report["rows"] + 1
+        headers = [sheet.cell(1, column).value for column in range(1, 8)]
+        first_row = sorted((item for item in report["cells"] if item["row"] == 2),
+                           key=lambda item: item["column"])
+        assert headers == [LABELS[item["field"]] for item in first_row]
         result_rows = list(sheet.iter_rows(min_row=2, values_only=True))
         source_rows = {row_number: row for row_number, row in enumerate(
             source_book["Data"].iter_rows(values_only=True), 1)}
