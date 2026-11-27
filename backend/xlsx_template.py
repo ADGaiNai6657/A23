@@ -2,6 +2,7 @@
 
 import json
 from collections import OrderedDict, defaultdict
+from decimal import Decimal
 from hashlib import sha256
 from io import BytesIO
 from threading import Lock
@@ -171,6 +172,8 @@ def _fill_claimed(source: bytes, source_name: str, template: bytes, template_nam
         for row_number, row in enumerate(rows, 2):
             for column_number, item in enumerate(row, 1):
                 value = item["value"]
+                if isinstance(value, Decimal):
+                    value = int(value) if value == value.to_integral_value() else float(value)
                 target = sheet.cell(row_number, column_number)
                 target.value = value
                 if isinstance(value, str) and target.data_type == "f":
