@@ -86,8 +86,16 @@ def ingest(file: Annotated[UploadFile, File()]) -> dict:
 @app.post("/extract", response_model=ExtractResult)
 def extract(file: Annotated[UploadFile, File()], metrics: Annotated[str, Form()] = "") -> dict:
     try:
+        content = file.file.read()
+        name = leaf_name(file.filename or "")
         chosen = [part.strip() for part in metrics.split(",") if part.strip()]
-        return extract_document(file.file.read(), file.filename or "", chosen, store)
+        request_id = store.register_extraction(name, content)
+        result = extract_document(content, name, chosen, store,
+                                  publish=lambda parsed, data, mode, facts, summary:
+                                  store.publish_extraction(parsed, data, mode, facts, request_id, summary))
+        if not result.pop("published"):
+            raise HTTPException(409, "同名文档的较新版本已发布，本次旧版抽取未覆盖事实")
+        return result
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 

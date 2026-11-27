@@ -3,6 +3,7 @@ import json
 import sqlite3
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from config import DATA
@@ -26,6 +27,17 @@ CREATE TABLE IF NOT EXISTS facts (
 );
 CREATE INDEX IF NOT EXISTS facts_lookup ON facts(entity, metric_key, period, scope);
 CREATE INDEX IF NOT EXISTS facts_document ON facts(doc, mode, block_no);
+CREATE TABLE IF NOT EXISTS extraction_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, doc TEXT NOT NULL, source_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS published_versions (
+    doc TEXT PRIMARY KEY, request_id INTEGER NOT NULL, source_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS extraction_tasks (
+    id TEXT PRIMARY KEY, doc TEXT NOT NULL, source_sha256 TEXT NOT NULL,
+    request_id INTEGER, status TEXT NOT NULL, submitted_at TEXT NOT NULL,
+    started_at TEXT, finished_at TEXT, result TEXT, error TEXT
+);
 """
 
 
@@ -47,6 +59,21 @@ class Store:
             connection.close()
 
     def save(self, parsed: ParsedDoc, content: bytes, mode: str | None = None, facts=()) -> None:
+        source_sha256 = hashlib.sha256(content).hexdigest()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            request = db.execute(
+                "INSERT INTO extraction_requests(doc, source_sha256) VALUES (?, ?)",
+                (parsed.file, source_sha256),
+            )
+            self._write_document(db, parsed, content, mode, facts)
+            db.execute("""INSERT INTO published_versions VALUES (?, ?, ?)
+                          ON CONFLICT(doc) DO UPDATE SET request_id=excluded.request_id,
+                          source_sha256=excluded.source_sha256""",
+                       (parsed.file, request.lastrowid, source_sha256))
+
+    @staticmethod
+    def _write_document(db, parsed: ParsedDoc, content: bytes, mode: str | None, facts) -> None:
         digest = hashlib.sha256(content).hexdigest()
         if parsed.file.lower().endswith((".txt", ".md")):
             digest = "line-number:" + digest
@@ -54,33 +81,62 @@ class Store:
             (block_no, block.type, block.text, json.dumps(block.locator, ensure_ascii=False, sort_keys=True))
             for block_no, block in parsed.numbered_blocks()
         ]
+        current = db.execute("SELECT digest FROM documents WHERE name = ?", (parsed.file,)).fetchone()
+        same_blocks = False
+        if current is not None and current["digest"] == digest:
+            saved = [
+                (row["number"], row["type"], row["text"],
+                 json.dumps(json.loads(row["locator"]), ensure_ascii=False, sort_keys=True))
+                for row in db.execute("SELECT number, type, text, locator FROM blocks WHERE doc = ? ORDER BY number",
+                                      (parsed.file,))
+            ]
+            same_blocks = saved == incoming
+        if not same_blocks:
+            db.execute("DELETE FROM documents WHERE name = ?", (parsed.file,))
+            db.execute("INSERT INTO documents VALUES (?, ?, ?)", (parsed.file, digest, content))
+            db.executemany("INSERT INTO blocks VALUES (?, ?, ?, ?, ?)", (
+                (parsed.file, *block) for block in incoming
+            ))
+        if mode is not None:
+            db.execute("DELETE FROM facts WHERE doc = ? AND mode = ?", (parsed.file, mode))
+            db.executemany("INSERT INTO facts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           ((parsed.file, mode, *fact) for fact in facts))
+
+    def register_extraction(self, doc: str, content: bytes) -> int:
+        with self.connect() as db:
+            saved = db.execute("INSERT INTO extraction_requests(doc, source_sha256) VALUES (?, ?)",
+                               (doc, hashlib.sha256(content).hexdigest()))
+            return saved.lastrowid
+
+    def publish_extraction(self, parsed: ParsedDoc, content: bytes, mode: str, facts,
+                           request_id: int, result: dict, task_id: str | None = None) -> bool:
+        """Commit facts and a task's terminal state together, respecting request order."""
+        digest = hashlib.sha256(content).hexdigest()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            current = db.execute(
-                "SELECT digest FROM documents WHERE name = ?", (parsed.file,),
-            ).fetchone()
-            same_blocks = False
-            if current is not None and current["digest"] == digest:
-                saved = [
-                    (row["number"], row["type"], row["text"],
-                     json.dumps(json.loads(row["locator"]), ensure_ascii=False, sort_keys=True))
-                    for row in db.execute(
-                        "SELECT number, type, text, locator FROM blocks WHERE doc = ? ORDER BY number",
-                        (parsed.file,),
-                    )
-                ]
-                same_blocks = saved == incoming
-            if not same_blocks:
-                db.execute("DELETE FROM documents WHERE name = ?", (parsed.file,))
-                db.execute("INSERT INTO documents VALUES (?, ?, ?)", (parsed.file, digest, content))
-                db.executemany("INSERT INTO blocks VALUES (?, ?, ?, ?, ?)", (
-                    (parsed.file, *block) for block in incoming
-                ))
-            if mode is not None:
-                db.execute("DELETE FROM facts WHERE doc = ? AND mode = ?", (parsed.file, mode))
-                db.executemany("""
-                    INSERT INTO facts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, ((parsed.file, mode, *fact) for fact in facts))
+            request = db.execute("SELECT doc, source_sha256 FROM extraction_requests WHERE id = ?",
+                                 (request_id,)).fetchone()
+            if request is None or request["doc"] != parsed.file or request["source_sha256"] != digest:
+                raise ValueError("抽取请求与原文件版本不一致")
+            winner = db.execute("SELECT request_id FROM published_versions WHERE doc = ?",
+                                (parsed.file,)).fetchone()
+            published = winner is None or request_id >= winner["request_id"]
+            if published:
+                self._write_document(db, parsed, content, mode, facts)
+                db.execute("""INSERT INTO published_versions VALUES (?, ?, ?)
+                              ON CONFLICT(doc) DO UPDATE SET request_id=excluded.request_id,
+                              source_sha256=excluded.source_sha256""",
+                           (parsed.file, request_id, digest))
+            if task_id is not None:
+                updated = db.execute("""
+                    UPDATE extraction_tasks SET status=?, finished_at=?, result=?, error=NULL
+                    WHERE id=? AND request_id=? AND status='running'
+                """, ("succeeded" if published else "superseded",
+                      datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                      json.dumps(result, ensure_ascii=False), task_id, request_id))
+                if updated.rowcount != 1:
+                    raise ValueError("识别任务状态与提交版本不一致")
+        return published
 
     def content(self, doc: str) -> bytes | None:
         with self.connect() as db:

@@ -60,8 +60,8 @@ def test_extract_http_accepts_all_formats_with_model_substitute(extension, tmp_p
     reply = {"facts": [{"block_no": 1, "metric": "GDP", "value": "100", "snippet": block.text}]}
     store = Store(tmp_path / "a23.db")
     monkeypatch.setattr(main, "store", store)
-    monkeypatch.setattr(main, "extract_document", lambda data, name, metrics, target: extract_document(
-        data, name, metrics, target, lambda _: reply,
+    monkeypatch.setattr(main, "extract_document", lambda data, name, metrics, target, *, publish: extract_document(
+        data, name, metrics, target, lambda _: reply, publish=publish,
     ))
     response = TestClient(main.app).post("/extract", files={"file": (path.name, content)})
     assert response.status_code == 200 and response.json()["kept"] == 1

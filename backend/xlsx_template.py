@@ -1,6 +1,7 @@
 """Confirmed, auditable XLSX target mapping for the public 03 data shape."""
 
 import json
+import re
 from copy import copy
 from collections import OrderedDict, defaultdict
 from datetime import date, datetime
@@ -14,6 +15,7 @@ from uuid import uuid4
 
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.worksheet.cell_range import CellRange
 
 from fill_spec import COUNTRY_KEYS, DATE_KEYS, normalize, spreadsheet_key
@@ -140,6 +142,15 @@ def validate_column_rules(sheet) -> None:
         index = dimension.index or letter
         if not index.isalpha() or (dimension.min and dimension.max and dimension.min != dimension.max):
             raise ValueError(f"目标工作表「{sheet.title}」列宽规则 {letter} 无法安全迁移；请改用七列表头")
+    if sheet.freeze_panes:
+        try:
+            coordinate_from_string(str(sheet.freeze_panes))
+        except ValueError as error:
+            raise ValueError(f"目标工作表「{sheet.title}」冻结窗格 {sheet.freeze_panes} 无法安全迁移；请改用七列表头") from error
+    if sheet.print_title_cols:
+        match = re.fullmatch(r"\$?([A-Z]+):\$?([A-Z]+)", sheet.print_title_cols)
+        if not match or column_index_from_string(match[2]) > 6:
+            raise ValueError(f"目标工作表「{sheet.title}」打印重复列 {sheet.print_title_cols} 无法安全迁移；请改用七列表头")
 
 
 def shift_column_rules(sheet) -> None:
@@ -165,6 +176,14 @@ def shift_column_rules(sheet) -> None:
         if shifted.max:
             shifted.max += 1
         sheet.column_dimensions[shifted.index] = shifted
+    if sheet.freeze_panes:
+        letter, row = coordinate_from_string(str(sheet.freeze_panes))
+        column = column_index_from_string(letter)
+        sheet.freeze_panes = f"{get_column_letter(column + 1) if column > 1 else letter}{row}"
+    if sheet.print_title_cols:
+        match = re.fullmatch(r"\$?([A-Z]+):\$?([A-Z]+)", sheet.print_title_cols)
+        sheet.print_title_cols = (f"{get_column_letter(column_index_from_string(match[1]) + 1)}:"
+                                  f"{get_column_letter(column_index_from_string(match[2]) + 1)}")
 
 
 def safe_excel_number(value: Decimal) -> int | float | None:

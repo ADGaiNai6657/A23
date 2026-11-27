@@ -36,6 +36,13 @@ class ModelFormatError(ValueError):
         self.response = response
 
 
+class BatchFailure(ValueError):
+    def __init__(self, batch_index: int, blocks: list[int], message: str):
+        super().__init__(message)
+        self.batch_index = batch_index
+        self.blocks = blocks
+
+
 @dataclass(frozen=True)
 class ModelReply:
     payload: object
@@ -162,7 +169,7 @@ def prompt_for(batch: dict[int, Block], metrics: list[str]) -> str:
 def extract_document(
     data: bytes, name: str, metrics: list[str], store: Store,
     respond: Callable[[str], dict | ModelReply] = model_response, *, workers: int = 1,
-    audit: dict | None = None,
+    audit: dict | None = None, publish: Callable | None = None,
 ) -> dict:
     mode = "list" if metrics else "general"
     started = perf_counter()
@@ -177,7 +184,7 @@ def extract_document(
             "batches": [],
         })
     try:
-        return extract_batches(data, name, metrics, mode, store, respond, workers, audit)
+        return extract_batches(data, name, metrics, mode, store, respond, workers, audit, publish)
     except Exception as error:
         if audit is not None:
             audit["error"] = str(error) if isinstance(error, ValueError) else type(error).__name__
@@ -190,6 +197,7 @@ def extract_document(
 def extract_batches(
     data: bytes, name: str, metrics: list[str], mode: str, store: Store,
     respond: Callable[[str], dict | ModelReply], workers: int, audit: dict | None,
+    publish: Callable | None = None,
 ) -> dict:
     parsed = parse_document(data, name)
     allowed = {metric_key(metric) for metric in metrics}
@@ -248,7 +256,13 @@ def extract_batches(
     pool = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
     try:
         indices = range(len(batches))
-        responses = list(pool.map(request, indices) if pool else map(request, indices))
+        pending = iter(pool.map(request, indices) if pool else map(request, indices))
+        responses = []
+        for index in indices:
+            try:
+                responses.append(next(pending))
+            except Exception as error:
+                raise BatchFailure(index + 1, list(batches[index]), str(error)) from error
     finally:
         if pool:
             pool.shutdown(cancel_futures=True)
@@ -288,7 +302,14 @@ def extract_batches(
     result = {"doc": name, "mode": mode, "count": count, "kept": len(collected), "rejected": rejected}
     if audit is not None:
         audit["result"] = result
-    store.save(parsed, data, mode, collected)
+    if publish is None:
+        store.save(parsed, data, mode, collected)
+        published = True
+    else:
+        published = publish(parsed, data, mode, collected, result)
+        result["published"] = published
     if audit is not None:
-        audit["stored_facts"] = [fact for fact in store.facts(name) if fact["mode"] == mode]
+        audit["published"] = published
+        audit["stored_facts"] = ([fact for fact in store.facts(name) if fact["mode"] == mode]
+                                 if published else [])
     return result

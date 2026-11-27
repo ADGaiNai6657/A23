@@ -518,8 +518,8 @@ def test_city_empty_database_extract_with_model_substitute_and_fill(tmp_path, mo
     monkeypatch.setattr(main, "REFERENCE_DIR", inputs)
     monkeypatch.setattr(main, "SYNTHETIC_REFERENCE", True)
     monkeypatch.setattr(main, "store", store)
-    monkeypatch.setattr(main, "extract_document", lambda data, name, metrics, target: extract_document(
-        data, name, metrics, target, demo_response,
+    monkeypatch.setattr(main, "extract_document", lambda data, name, metrics, target, *, publish: extract_document(
+        data, name, metrics, target, demo_response, publish=publish,
     ))
     client = TestClient(main.app)
     request = {"doc": CITY_DOC, "template": CITY_TEMPLATE}

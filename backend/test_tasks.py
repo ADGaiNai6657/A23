@@ -18,7 +18,7 @@ def completed(client, task_id):
     while monotonic() < deadline:
         response = client.get(f"/tasks/{task_id}")
         assert response.status_code == 200
-        if response.json()["status"] in {"succeeded", "failed"}:
+        if response.json()["status"] in {"succeeded", "superseded", "failed"}:
             return response.json()
         sleep(0.01)
     raise AssertionError("异步识别任务没有在 5 秒内结束")
@@ -29,10 +29,10 @@ def test_task_returns_id_before_model_finishes_then_saves_result(tmp_path, monke
     monkeypatch.setattr(main, "store", database)
     entered, release = Event(), Event()
 
-    def model_substitute(content, name, metrics, store, *, audit):
+    def model_substitute(content, name, metrics, store, *, audit, publish):
         entered.set()
         assert release.wait(5)
-        return extractor.extract_document(content, name, metrics, store, audit=audit,
+        return extractor.extract_document(content, name, metrics, store, audit=audit, publish=publish,
                                           respond=lambda prompt: {"facts": [{
                                               "block_no": 1, "entity": "甲市", "metric": "GDP",
                                               "value": "90", "unit": "亿元", "snippet": "GDP 90 亿元",
@@ -62,9 +62,8 @@ def test_task_failure_locates_batch_and_survives_query(tmp_path, monkeypatch):
     database = Store(tmp_path / "tasks.db")
     monkeypatch.setattr(main, "store", database)
 
-    def failing_model(content, name, metrics, store, *, audit):
-        audit["batches"] = [{"blocks": [1], "attempts": [{"error": "模型响应无效"}]}]
-        raise ValueError("模型返回的事实字段不符合约定")
+    def failing_model(content, name, metrics, store, *, audit, publish):
+        raise extractor.BatchFailure(1, [1], "模型返回的事实字段不符合约定")
 
     monkeypatch.setattr(task_queue, "extract_document", failing_model)
     client = TestClient(main.app)

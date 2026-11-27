@@ -273,7 +273,7 @@ def test_excess_precision_refused_with_original_value():
         revised.close()
 
 
-def six_column_rules(*, formula=False):
+def six_column_rules(*, formula=False, frozen=False, unsafe_print=False):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "目标"
@@ -283,6 +283,9 @@ def six_column_rules(*, formula=False):
     sheet.add_data_validation(rule)
     rule.add("B2:B20")
     sheet.auto_filter.ref = "A1:F20"
+    if frozen:
+        sheet.freeze_panes = "B2"
+        sheet.print_title_cols = "G:G" if unsafe_print else "A:A"
     sheet.column_dimensions["A"].width = 31
     sheet.column_dimensions["B"].width = 13
     output = BytesIO()
@@ -317,6 +320,30 @@ def test_six_column_formula_validation_requires_seven_headers():
     assert "B2:B20" in preview.json()["detail"]
     assert "七列表头" in preview.json()["detail"]
     assert report is content is None
+
+
+def test_six_column_freeze_and_print_repetition_follow_country():
+    preview, report, content = mapped_upload(
+        TestClient(main.app), synthetic_source(), six_column_rules(frozen=True))
+    assert preview.status_code == 200 and report["cells_written"] == 7
+    revised = load_workbook(BytesIO(content))
+    try:
+        sheet = revised["目标"]
+        assert sheet["B1"].value == "国家/地区"
+        assert sheet.freeze_panes == "C2"
+        assert sheet.print_title_cols == "$B:$B"
+        assert sheet["C2"].value == "亚洲"
+        assert sheet.auto_filter.ref == "A1:G20"
+    finally:
+        revised.close()
+
+
+def test_six_column_unsafe_print_repetition_is_located_in_preview():
+    preview, report, content = mapped_upload(
+        TestClient(main.app), synthetic_source(), six_column_rules(frozen=True, unsafe_print=True))
+    assert preview.status_code == 400 and report is content is None
+    assert "目标" in preview.json()["detail"] and "打印重复列" in preview.json()["detail"]
+    assert "$G:$G" in preview.json()["detail"] and "七列表头" in preview.json()["detail"]
 
 
 @pytest.mark.parametrize("values,code,expected", [
