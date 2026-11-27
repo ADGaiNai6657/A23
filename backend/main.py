@@ -22,6 +22,7 @@ from filler import block_digest, fill_workbook, resolve_facts
 import operations
 import air_quality
 import xlsx_template
+import task_queue
 from parsers import leaf_name, parse_document
 from schema import ExtractResult, FactDecisionRequest, FillRequest, ParsedDoc
 from store import Store
@@ -89,6 +90,25 @@ def extract(file: Annotated[UploadFile, File()], metrics: Annotated[str, Form()]
         return extract_document(file.file.read(), file.filename or "", chosen, store)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
+
+
+@app.post("/tasks", status_code=202)
+def submit_extraction_task(file: Annotated[UploadFile, File()],
+                           metrics: Annotated[str, Form()] = "") -> dict:
+    try:
+        return task_queue.submit(store, file.file.read(), file.filename or "", metrics)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@app.get("/tasks/{task_id}")
+def extraction_task(task_id: str) -> dict:
+    if len(task_id) != 32 or any(char not in "0123456789abcdef" for char in task_id):
+        raise HTTPException(404, "没有这条识别任务")
+    task = task_queue.get(store, task_id)
+    if task is None:
+        raise HTTPException(404, "没有这条识别任务")
+    return task
 
 
 @app.post("/operations/preview")
