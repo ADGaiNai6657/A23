@@ -626,8 +626,10 @@ function fillXlsxTemplate() {
         <h3>确认目标字段映射</h3>
         <p>源工作表：{{ xlsxPlan.source_sheets.map(item => item.name).join('、') }}</p>
         <label class="field"><span>目标工作表</span><select v-model="xlsxSheet" @change="selectXlsxSheet">
-          <option v-for="item in xlsxPlan.target_sheets" :key="item.name" :value="item.name">{{ item.name }}</option>
+          <option v-for="item in xlsxPlan.target_sheets" :key="item.name" :value="item.name">{{ item.name }}{{ item.blocked_reason ? '（不可填写）' : '' }}</option>
         </select></label>
+        <p v-if="xlsxSheetInfo?.write_range">预定写入范围：{{ xlsxSheetInfo.name }}!{{ xlsxSheetInfo.write_range }}，共 {{ xlsxSheetInfo.write_rows }} 行。范围外的内容将保留。</p>
+        <p v-if="xlsxSheetInfo?.blocked_reason" class="feedback feedback-error" role="alert">{{ xlsxSheetInfo.blocked_reason }}</p>
         <p v-if="xlsxSheetInfo?.headers.length === 6">目标模板没有日期列，填写时会在最前面插入「日期」。</p>
         <div v-for="item in xlsxSheetInfo?.headers ?? []" :key="item.column" class="field">
           <label :for="`xlsx-map-${item.column}`">{{ item.column }} 列「{{ item.label || '空表头' }}」映射到</label>
@@ -636,7 +638,7 @@ function fillXlsxTemplate() {
             <option v-for="field in xlsxPlan.fields" :key="field.key" :value="field.key">{{ field.label }}</option>
           </select>
         </div>
-        <button class="button button-primary" type="button" :disabled="Boolean(pending)" @click="fillXlsxTemplate">确认映射并填写</button>
+        <button class="button button-primary" type="button" :disabled="Boolean(pending) || !xlsxSheetInfo?.write_range" @click="fillXlsxTemplate">确认映射并填写</button>
       </div>
       <div v-if="xlsxResult" class="operation-review">
         <h3>目标 XLSX 填写结果</h3>
@@ -646,7 +648,15 @@ function fillXlsxTemplate() {
           <label class="field"><span>行号</span><input v-model.number="xlsxRow" type="number" min="2"></label>
           <label class="field"><span>列号</span><input v-model.number="xlsxColumn" type="number" min="1" max="7"></label>
         </div>
-        <p v-if="xlsxSelectedCell">{{ xlsxResult.sheet }} 第 {{ xlsxSelectedCell.row }} 行第 {{ xlsxSelectedCell.column }} 列「{{ xlsxSelectedCell.field }}」：{{ xlsxSelectedCell.value ?? '真空格' }}；{{ xlsxSelectedCell.reason }}；来源 {{ xlsxSelectedCell.source_sheet }}!{{ xlsxSelectedCell.source_column }}{{ xlsxSelectedCell.source_row }}，原值 {{ xlsxSelectedCell.source_value ?? '空' }}</p>
+        <template v-if="xlsxSelectedCell">
+          <p>{{ xlsxResult.sheet }} 第 {{ xlsxSelectedCell.row }} 行第 {{ xlsxSelectedCell.column }} 列「{{ xlsxSelectedCell.field }}」：{{ xlsxSelectedCell.value ?? '真空格' }}；{{ xlsxSelectedCell.decision === 'refused' ? '拒填' : '已填' }}；{{ xlsxSelectedCell.reason }}</p>
+          <p v-if="xlsxSelectedCell.source_sheet">来源 {{ xlsxSelectedCell.source_sheet }}!{{ xlsxSelectedCell.source_column }}{{ xlsxSelectedCell.source_row }}，原值 {{ xlsxSelectedCell.source_value ?? '空' }}</p>
+          <p v-if="xlsxSelectedCell.reason_code === 'source_blank'">源表真空：该字段没有可用原值。</p>
+          <div v-if="xlsxSelectedCell.conflicts?.length">
+            <p>来源冲突，以下候选均未采用：</p>
+            <ul><li v-for="(option, index) in xlsxSelectedCell.conflicts" :key="index">候选 {{ index + 1 }}：{{ option.value }}；{{ option.source_sheet }}!{{ option.source_column }}{{ option.source_row }}，原值 {{ option.source_value }}</li></ul>
+          </div>
+        </template>
         <p v-else>请输入结果范围内的行列号查看逐格来源。</p>
       </div>
     </section>

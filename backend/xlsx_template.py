@@ -2,9 +2,11 @@
 
 import json
 from collections import OrderedDict, defaultdict
+from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
 from io import BytesIO
+from math import isfinite
 from threading import Lock
 from time import monotonic
 from uuid import uuid4
@@ -42,7 +44,9 @@ def target_sheets(content: bytes) -> list[dict]:
         result = []
         for sheet in workbook:
             sheet.reset_dimensions()
-            headers = next(sheet.iter_rows(values_only=True), ())
+            headers = list(next(sheet.iter_rows(values_only=True), ()))
+            while headers and (headers[-1] is None or str(headers[-1]).strip() == ""):
+                headers.pop()
             result.append({"name": sheet.title, "headers": [
                 {"column": get_column_letter(column), "label": str(value or "").strip(),
                  "suggested": field_for(value)}
@@ -75,15 +79,80 @@ def source_headers(content: bytes) -> tuple[list[dict], dict[str, dict[str, tupl
     return result, positions
 
 
+def source_data_rows(content: bytes, name: str) -> list[list[dict]]:
+    parsed = parse_document(content, name)
+    blocks = [
+        {"doc": name, "number": number, "type": block.type,
+         "text": block.text, "locator": block.locator}
+        for number, block in parsed.numbered_blocks()
+    ]
+    return covid_rows(content, blocks, tuple(LABELS[key] for key in FIELDS))
+
+
+def validate_write_area(sheet, rows_count: int, header_count: int) -> str:
+    """Only blank, unmerged data cells may be written; preserve all other cells."""
+    width = len(FIELDS)
+    last_row = rows_count + 1
+    if sheet.protection.sheet:
+        raise ValueError(f"目标工作表「{sheet.title}」已保护，无法填写 A2:G{last_row}")
+    for merged in sheet.merged_cells.ranges:
+        touches_write = (merged.min_row <= last_row and merged.max_row >= 2
+                         and merged.min_col <= width)
+        if touches_write or header_count == width - 1:
+            raise ValueError(f"目标工作表「{sheet.title}」{merged} 含合并单元格，无法安全填写")
+    for cell in sheet._cells.values():
+        if cell.value is None and cell.comment is None:
+            continue
+        if header_count == width - 1:
+            writable_header = cell.row == 1 and 1 <= cell.column <= header_count
+            if not writable_header:
+                raise ValueError(
+                    f"目标工作表「{sheet.title}」{cell.coordinate} 已有内容；插入日期列会移动该位置，请改用空白模板或七列表头"
+                )
+        elif 2 <= cell.row <= last_row and 1 <= cell.column <= width:
+            kind = "公式" if cell.data_type == "f" else "批注" if cell.comment else "内容"
+            raise ValueError(f"目标工作表「{sheet.title}」{cell.coordinate} 已有{kind}，位于预定写入范围 A2:G{last_row}")
+    return f"A2:G{last_row}"
+
+
+def safe_excel_number(value: Decimal) -> int | float | None:
+    """Reject numbers Excel cannot preserve under the 15 significant digit policy."""
+    if len(value.normalize().as_tuple().digits) > 15 or abs(value) >= 10**15:
+        return None
+    converted = int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(converted, float) and not isfinite(converted):
+        return None
+    return converted if Decimal(str(converted)) == value else None
+
+
 def inspect(source: bytes, source_name: str, template: bytes, template_name: str) -> dict:
     if not source or not template or max(len(source), len(template)) > MAX_FILE_BYTES:
         raise ValueError("源文件或模板为空，或超过 12 MB")
     if not source_name.lower().endswith(".xlsx") or not template_name.lower().endswith(".xlsx"):
         raise ValueError("此链路需要 XLSX 源文件和 XLSX 目标模板")
-    targets = target_sheets(template)
     sources, _ = source_headers(source)
+    targets = target_sheets(template)
     if not targets or not sources:
         raise ValueError("源文件或目标模板缺少工作表")
+    rows_count = len(source_data_rows(source, source_name))
+    workbook = load_workbook(compatible_workbook(template))
+    try:
+        first_error = None
+        for target in targets:
+            if len(target["headers"]) not in (6, 7):
+                continue
+            try:
+                target["write_range"] = validate_write_area(
+                    workbook[target["name"]], rows_count, len(target["headers"])
+                )
+                target["write_rows"] = rows_count
+            except ValueError as error:
+                target["blocked_reason"] = str(error)
+                first_error = first_error or str(error)
+        if not any(target.get("write_range") for target in targets):
+            raise ValueError(first_error or "目标模板没有可填写的 6 列或 7 列工作表")
+    finally:
+        workbook.close()
     plan_id = uuid4().hex
     with lock:
         prune_expired(plans, monotonic())
@@ -146,59 +215,88 @@ def _fill_claimed(source: bytes, source_name: str, template: bytes, template_nam
         raise ValueError(f"目标工作表「{sheet_name}」不存在，请重新选择")
     keys = validate_mapping(chosen["headers"], mapping)
     _, source_columns = source_headers(source)
-    parsed = parse_document(source, source_name)
-    blocks = [
-        {"doc": source_name, "number": number, "type": block.type,
-         "text": block.text, "locator": block.locator}
-        for number, block in parsed.numbered_blocks()
-    ]
     output_keys = tuple(keys)
     add_date = "date" not in keys
     if add_date:
         output_keys = ("date", *output_keys)
-    mapped_headers = tuple(LABELS[key] for key in output_keys)
-    rows = covid_rows(source, blocks, mapped_headers)
-    needed_rows = {(item["source"]["locator"]["sheet"], item["source"]["locator"]["row"])
-                   for row in rows for item in row if item.get("source")}
+    rows = source_data_rows(source, source_name)
+    by_field = {key: index for index, key in enumerate(FIELDS)}
+    rows = [[row[by_field[key]] for key in output_keys] for row in rows]
+    source_infos = [source_info for row in rows for item in row
+                    for source_info in ([item["source"]] if item.get("source") else [])
+                    + [option["source"] for option in item.get("conflicts", [])]]
+    needed_rows = {(info["locator"]["sheet"], info["locator"]["row"])
+                   for info in source_infos}
     raw_rows = {(sheet, row): values for sheet, row, values in workbook_rows(source)
                 if (sheet, row) in needed_rows}
     book = load_workbook(compatible_workbook(template))
     try:
         sheet = book[sheet_name]
+        validate_write_area(sheet, len(rows), len(chosen["headers"]))
         if add_date:
             sheet.insert_cols(1)
             sheet.cell(1, 1, "日期")
+        def provenance_for(source_info, key):
+            if not source_info:
+                return {}
+            locator = source_info["locator"]
+            source_sheet, source_row = locator["sheet"], locator["row"]
+            coordinate = source_columns[source_sheet].get(key)
+            if coordinate is None:
+                return {}
+            source_column, source_header = coordinate
+            raw = raw_rows[(source_sheet, source_row)].get(source_info.get("field", source_header))
+            return {"source_sheet": source_sheet, "source_row": source_row,
+                    "source_column": get_column_letter(source_column), "source_value": raw}
+
+        def report_number(value):
+            if not isinstance(value, Decimal):
+                return value
+            safe = safe_excel_number(value)
+            return safe if safe is not None else str(value)
+
         cells = []
         for row_number, row in enumerate(rows, 2):
             for column_number, item in enumerate(row, 1):
                 value = item["value"]
-                if isinstance(value, Decimal):
-                    value = int(value) if value == value.to_integral_value() else float(value)
+                reason, reason_code = item["reason"], item.get("reason_code")
+                if isinstance(value, Decimal) and safe_excel_number(value) is None:
+                    value = None
+                    reason = "源数值超出 Excel 可可靠保存的范围或 15 位有效数字，已拒填并保留原值"
+                    reason_code = "precision_loss"
+                else:
+                    value = report_number(value)
                 target = sheet.cell(row_number, column_number)
                 target.value = value
                 if isinstance(value, str) and target.data_type == "f":
                     target.data_type = "s"
                 key = output_keys[column_number - 1]
-                source_info = item.get("source")
-                provenance = {}
-                if source_info:
-                    locator = source_info["locator"]
-                    source_sheet, source_row = locator["sheet"], locator["row"]
-                    coordinate = source_columns[source_sheet].get(key)
-                    if coordinate:
-                        source_column, source_header = coordinate
-                        provenance = {"source_sheet": source_sheet, "source_row": source_row,
-                                      "source_column": get_column_letter(source_column),
-                                      "source_value": raw_rows[(source_sheet, source_row)].get(source_header)}
+                provenance = provenance_for(item.get("source"), key)
+                conflicts = [
+                    {"value": report_number(option["value"]),
+                     **provenance_for(option["source"], key)}
+                    for option in item.get("conflicts", [])
+                ]
                 cells.append({"row": row_number, "column": column_number, "field": key,
-                              "value": value, "reason": item["reason"],
-                              "reason_code": item.get("reason_code"), **provenance})
-        if sheet.max_row > len(rows) + 1:
-            sheet.delete_rows(len(rows) + 2, sheet.max_row - len(rows) - 1)
+                              "value": value, "decision": "filled" if value is not None else "refused",
+                              "reason": reason, "reason_code": reason_code,
+                              **provenance, **({"conflicts": conflicts} if conflicts else {})})
         output = BytesIO()
         book.save(output)
     finally:
         book.close()
+    saved = load_workbook(BytesIO(output.getvalue()), data_only=True)
+    try:
+        for item in cells:
+            actual = saved[sheet_name].cell(item["row"], item["column"]).value
+            expected = item["value"]
+            if isinstance(actual, (date, datetime)) and isinstance(expected, (date, datetime)):
+                actual = actual.date() if isinstance(actual, datetime) else actual
+                expected = expected.date() if isinstance(expected, datetime) else expected
+            if actual != expected:
+                raise ValueError(f"目标工作表「{sheet_name}」{get_column_letter(item['column'])}{item['row']} 落盘值与报告不一致，未发布副本")
+    finally:
+        saved.close()
     result_id = store_output(f"填写结果_{template_name}", output.getvalue())
     return {"result_id": result_id, "sheet": sheet_name, "rows": len(rows),
             "cells_written": sum(cell["value"] is not None for cell in cells),
