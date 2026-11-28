@@ -1,5 +1,6 @@
 import json
 import re
+from collections import Counter
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -299,7 +300,22 @@ def extract_batches(
             if reason:
                 rejected[reason] = rejected.get(reason, 0) + 1
 
-    result = {"doc": name, "mode": mode, "count": count, "kept": len(collected), "rejected": rejected}
+    format_name = {".txt": "txt", ".md": "markdown", ".docx": "docx", ".xlsx": "xlsx"}[
+        "." + name.rsplit(".", 1)[-1].lower()
+    ]
+    block_types = dict(sorted(Counter(block.type for _, block in blocks).items()))
+    numeric_facts = sum(fact[5] is not None for fact in collected)
+    classification = {
+        "schema_version": 1,
+        "method": "parser_structure_v1",
+        "document_format": format_name,
+        "content_family": "tabular" if format_name == "xlsx" else "document" if format_name == "docx" else "text",
+        "block_types": block_types,
+        "extracted_value_types": {"number": numeric_facts, "other": len(collected) - numeric_facts},
+        "semantic_category": None,
+    }
+    result = {"doc": name, "mode": mode, "count": count, "kept": len(collected),
+              "rejected": rejected, "classification": classification}
     if audit is not None:
         audit["result"] = result
     if publish is None:

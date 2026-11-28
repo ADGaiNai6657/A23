@@ -96,6 +96,10 @@ $env:A23_SYNTHETIC_REFERENCE = "1"
 
 需要异步识别时，向 `POST /tasks` 以 multipart 上传 `file`，可附带逗号分隔的 `metrics`。接口立即以 HTTP 202 返回 `task_id`、`queued` 状态和提交时间；用 `GET /tasks/{task_id}` 查询排队、运行、成功、失败或被较新版本取代的 `superseded` 状态。查询同时返回任务原文件摘要 `source_sha256`、当前已发布摘要 `current_source_sha256` 和 `is_current`。同名文档按请求登记顺序发布：较新请求成功后，慢完成的旧请求不能覆盖它；同步 `/extract` 也遵循此顺序，旧版被取代时返回 409。成功时 `result` 与同步 `/extract` 的摘要一致；失败时 `error` 包含中文原因，模型批次失败还会给出最终失败的 `batch_index` 和块号。提交、开始和结束时间分别记录。任务状态保存在当前 `A23_DATA_DIR/a23.db`；文档、事实与任务成功状态在同一个 SQLite 事务中提交。服务重启后未提交成功的任务标为中断失败，已提交成功的任务保持成功。首版使用单进程、两个后台线程、最多 16 个排队或运行任务；上传文件只在该进程内等待执行，部署时请仅运行一个服务进程。此接口会调用已配置的 DeepSeek 并产生 API 用量，自动化测试只用模型替身。
 
+成功结果另含 `classification`（契约版本 1）：`method=parser_structure_v1`、`document_format`、`content_family`、`block_types`、`extracted_value_types` 和 `semantic_category=null`。这是解析结构与已保留事实的规则分类；尚无赛题语义类别标注或正式识别准确率。失败任务不生成分类结果。
+
+可用 `backend/timing_capture.py` 对一次异步识别作客户端计时；可选固定 01/03 模板填写及下载。完成上面的合成样例启动后，例：`.venv/bin/python backend/timing_capture.py backend/data/demo/doc/合成逐日统计.xlsx --template-name 模板_合成逐日.xlsx --output-name filled_covid19_byday.xlsx --record /tmp/a23-timing.json`。不填两个模板参数时只记录识别。JSON 中 `first_response_seconds` 是提交到任务 ID 首响，`terminal_observed_seconds` 是提交到轮询观察到终态；`queue_seconds` 和 `run_seconds` 按服务端时间戳计算；`fill_request_seconds`、`download_request_seconds` 为各请求耗时，`fill_response_seconds`、`download_complete_seconds` 为从最初提交起的累计时间。记录任务和当前原文摘要、结果文件摘要，以便核对版本。该脚本的固定模板链路从原文提交开始，不能充作赛题“模板上传/启动到完成填写”的正式 90 秒计时。正式五套模板、参考结果和赛方计时边界仍需取得后独立测量。真实调用会消耗 DeepSeek 额度；自动化测试只用模型替身。
+
 ## 自然语言操作
 
 在工作台「自然语言操作」选择不超过 12 MB 的 DOCX 或 XLSX，输入中文指令后点「识别并预览」。预览会把文档内容及指令发送到已配置的 DeepSeek，页面先询问是否继续。核对操作列表中的目标位置、原内容和预期结果，再点「确认并执行」。成功后逐项显示执行结果，编辑或排版任务可下载文件副本。提取任务直接显示原文和第几段或工作表单元格位置。

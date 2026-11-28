@@ -54,6 +54,11 @@ def test_task_returns_id_before_model_finishes_then_saves_result(tmp_path, monke
     finished = completed(client, task_id)
     assert finished["status"] == "succeeded"
     assert finished["result"]["kept"] == 1 and finished["result"]["doc"] == "合成.txt"
+    assert finished["result"]["classification"] == {
+        "schema_version": 1, "method": "parser_structure_v1", "document_format": "txt",
+        "content_family": "text", "block_types": {"text_line": 1},
+        "extracted_value_types": {"number": 1, "other": 0}, "semantic_category": None,
+    }
     assert finished["error"] is None and finished["finished_at"]
     assert database.facts("合成.txt")[0]["value"] == "90"
 

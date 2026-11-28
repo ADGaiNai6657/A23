@@ -75,7 +75,12 @@ def check_execution(
             raise ValueError("在线重建缺少原始城市文档")
         with TemporaryDirectory(prefix="a23-online-replay-") as temporary:
             replayed = replay_run(Path(doc), content, recorded, Store(Path(temporary) / "replay.db"))
-        if replayed["stored_facts"] != facts or replayed["result"] != recorded.get("result"):
+        replay_result = dict(replayed["result"])
+        # Older signed archives predate the deterministic classification field.
+        # Keep comparing every field that the archived run actually recorded.
+        if "classification" not in (recorded.get("result") or {}):
+            replay_result.pop("classification", None)
+        if replayed["stored_facts"] != facts or replay_result != recorded.get("result"):
             raise ValueError("逐批重放所得事实或计数与在线记录不一致")
     if archived_input is None and Store(database).facts(doc) != facts:
         raise ValueError("数据库中的城市事实与本轮抽取留档不一致")

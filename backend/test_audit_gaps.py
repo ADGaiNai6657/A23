@@ -65,6 +65,9 @@ def test_extract_http_accepts_all_formats_with_model_substitute(extension, tmp_p
     ))
     response = TestClient(main.app).post("/extract", files={"file": (path.name, content)})
     assert response.status_code == 200 and response.json()["kept"] == 1
+    assert response.json()["classification"]["document_format"] == (
+        "markdown" if extension == "md" else extension)
+    assert response.json()["classification"]["schema_version"] == 1
     assert store.block(path.name, 1)["locator"] == block.locator
 
 

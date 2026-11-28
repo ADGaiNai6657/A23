@@ -57,9 +57,20 @@ class FactDecisionRequest(BaseModel):
 Mode = Literal["general", "list"]
 
 
+class ClassificationResult(BaseModel):
+    schema_version: Literal[1]
+    method: Literal["parser_structure_v1"]
+    document_format: Literal["txt", "markdown", "docx", "xlsx"]
+    content_family: Literal["text", "document", "tabular"]
+    block_types: dict[str, int]
+    extracted_value_types: dict[str, int]
+    semantic_category: str | None = None
+
+
 class ExtractResult(BaseModel):
     doc: str
     mode: Mode
     count: int
     kept: int
     rejected: dict[str, int] = Field(default_factory=dict)
+    classification: ClassificationResult
