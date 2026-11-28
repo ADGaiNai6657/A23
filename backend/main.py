@@ -234,7 +234,8 @@ def fill(request: FillRequest, response: Response) -> dict:
         doc = leaf_name(request.doc)
         with fill_lock:
             result = fill_workbook(store, doc, find_template(request.template), DATA, request.source_sha256,
-                                   target_period=request.target_period)
+                                   target_period=request.target_period,
+                                   expected_publication_id=request.expected_publication_id)
             try:
                 score_filled(doc)
             except (OSError, ValueError, BadZipFile, InvalidFileException, KeyError, StopIteration):
@@ -242,11 +243,14 @@ def fill(request: FillRequest, response: Response) -> dict:
                 response.headers["X-A23-Score-Status"] = "failed"
         response.headers["X-A23-Result-ID"] = result.pop("result_id")
         response.headers["X-A23-Fill-Seconds"] = str(result.pop("fill_seconds"))
+        publication_id = result.pop("publication_id")
+        if publication_id is not None:
+            response.headers["X-A23-Publication-ID"] = str(publication_id)
         return result
     except (BadZipFile, InvalidFileException, KeyError) as error:
         raise HTTPException(400, "无法读取 XLSX 模板，请检查文件内容") from error
     except (OSError, ValueError) as error:
-        raise HTTPException(400, str(error)) from error
+        raise HTTPException(409 if "事实版本冲突" in str(error) else 400, str(error)) from error
 
 
 def score_filled(doc: str) -> None:

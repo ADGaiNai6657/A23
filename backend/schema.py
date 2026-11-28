@@ -43,6 +43,7 @@ class FillRequest(BaseModel):
     doc: str
     template: str
     source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    expected_publication_id: int | None = Field(default=None, ge=1)
     target_period: str | None = Field(default=None, pattern=r"^(?:19|20)\d{2}$")
 
 

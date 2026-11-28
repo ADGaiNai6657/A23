@@ -47,7 +47,7 @@ def checked_outputs(directory: Path, basis: str, *, require_database: bool = Tru
         identities = {
             "result_id": json_digest({
                 key: value for key, value in trace.items()
-                if key not in {"run_id", "result_id", "workbook_sha256", "fill_seconds"}
+                    if key not in {"run_id", "result_id", "workbook_sha256", "fill_seconds"}
             }),
             "run_id": trace.get("run_id"),
             "workbook_sha256": sha256(required_file(directory, file, case)).hexdigest(),

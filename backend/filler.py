@@ -314,13 +314,14 @@ def covid_value(key: str, value: object) -> object:
 def fill_workbook(
     store: Store, doc: str, template: Path, output_dir: Path, source_sha256: str | None = None,
     *, target_period: str | None = None, formal_city: bool = False,
+    expected_publication_id: int | None = None,
 ) -> dict:
     started = perf_counter()
     city = doc.lower().endswith(".docx")
-    snapshot = store.snapshot(doc, with_facts=city)
+    snapshot = store.snapshot(doc, with_facts=city, expected_publication_id=expected_publication_id)
     if snapshot is None:
         raise ValueError("库里没有这份文档")
-    content, blocks, facts = snapshot
+    content, blocks, facts, publication_id = snapshot
     document_digest = sha256(content).hexdigest()
     if source_sha256 is not None and source_sha256 != document_digest:
         raise ValueError("上传文件与库中同名文档内容不同，请先重新导入或抽取")
@@ -377,6 +378,7 @@ def fill_workbook(
             "block_count": len(blocks),
             "refusal_counts": dict(Counter(item["reason_code"] for item in cells if "reason_code" in item)),
         }
+        trace["publication_id"] = publication_id
         result_id = json_digest(trace)
         output = output_dir / filename
         # Save each workbook and its byte hash from the same local buffer.
@@ -399,4 +401,5 @@ def fill_workbook(
             raise
     finally:
         workbook.close()
-    return {**result, "result_id": result_id, "fill_seconds": seconds}
+    return {**result, "result_id": result_id, "fill_seconds": seconds,
+            "publication_id": publication_id}

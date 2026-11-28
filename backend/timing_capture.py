@@ -42,7 +42,9 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
     record = {
         "schema_version": 1, "scope": "fixed_template_client" if template_name else "extraction_client",
         "source_name": source_name, "source_sha256": sha256(source).hexdigest(),
-        "task_id": task_id, "status": task["status"], "client_started_at": started_at,
+        "task_id": task_id, "status": task["status"], "task_status": task["status"],
+        "publication_id": task["publication_id"], "fill_publication_id": None,
+        "client_started_at": started_at,
         "task_source_sha256": task["source_sha256"],
         "current_source_sha256": task["current_source_sha256"],
         "is_current": task["is_current"],
@@ -58,17 +60,31 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
     if template_name and task["status"] == "succeeded" and task["is_current"]:
         fill_start = clock()
         filled = client.post("/fill", json={"doc": source_name, "template": template_name,
-                                             "source_sha256": record["source_sha256"]})
+                                             "source_sha256": record["source_sha256"],
+                                             "expected_publication_id": record["publication_id"]})
         record["fill_request_seconds"] = round(clock() - fill_start, 4)
         record["fill_response_seconds"] = round(clock() - start, 4)
+        if filled.status_code == 409:
+            record["status"] = "version_conflict"
+            record["error"] = {"code": "version_conflict", "message": filled.json().get("detail", "事实版本冲突")}
+            return record
         filled.raise_for_status()
+        record["fill_publication_id"] = int(filled.headers["X-A23-Publication-ID"])
+        if record["fill_publication_id"] != record["publication_id"]:
+            raise ValueError("填写结果与识别任务的事实批次不一致")
         result_id = filled.headers["X-A23-Result-ID"]
         download_start = clock()
         downloaded = client.get("/files", params={"name": output_name, "result_id": result_id})
         record["download_request_seconds"] = round(clock() - download_start, 4)
         record["download_complete_seconds"] = round(clock() - start, 4)
+        if downloaded.status_code == 409:
+            record["status"] = "version_conflict"
+            record["error"] = {"code": "version_conflict",
+                               "message": downloaded.json().get("detail", "填写结果版本冲突")}
+            return record
         downloaded.raise_for_status()
         record["download"] = {"name": output_name, "result_id": result_id,
+                              "publication_id": record["fill_publication_id"],
                               "bytes": len(downloaded.content),
                               "sha256": sha256(downloaded.content).hexdigest()}
     return record
@@ -76,8 +92,11 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
 
 def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: bytes,
                           template_name: str, sheet: str, mapping: dict[str, str], *,
-                          download_to: Path | None = None, clock=monotonic) -> dict:
+                          download_to: Path | None = None, timeout: float = 300,
+                          clock=monotonic) -> dict:
     """Time a confirmed 03-style template from upload preview through download."""
+    if timeout <= 0:
+        raise ValueError("上传模板计时的 --timeout 必须大于 0 秒")
     started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     start = clock()
     files = {"source": (source_name, source), "template": (template_name, template)}
@@ -86,6 +105,7 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
         "source_name": source_name, "source_sha256": sha256(source).hexdigest(),
         "template_name": template_name, "template_sha256": sha256(template).hexdigest(),
         "sheet": sheet, "mapping": mapping, "status": "running", "error": None,
+        "timeout_seconds": timeout,
         "preview_response_seconds": None, "fill_complete_seconds": None,
         "fill_request_seconds": None, "download_complete_seconds": None,
         "download_request_seconds": None, "fill": None, "download": None,
@@ -97,37 +117,84 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
         except ValueError:
             detail = response.text
         record["status"] = "failed"
-        record["error"] = {"stage": stage, "http_status": response.status_code, "detail": detail}
+        record["error"] = {"stage": stage, "sheet": sheet,
+                           "http_status": response.status_code, "detail": detail}
         return record
 
-    preview = client.post("/templates/xlsx/inspect", files=files)
+    def timed_out(stage: str) -> dict:
+        elapsed = round(clock() - start, 4)
+        record["status"] = "timed_out"
+        record["error"] = {"code": "timeout", "stage": stage, "sheet": sheet,
+                           "elapsed_seconds": elapsed,
+                           "detail": f"上传模板计时超过 {timeout} 秒，停止于{stage}阶段"}
+        return record
+
+    def remaining() -> float:
+        return timeout - (clock() - start)
+
+    if remaining() <= 0:
+        return timed_out("inspect")
+    try:
+        preview = client.post("/templates/xlsx/inspect", files=files, timeout=remaining())
+    except httpx.TimeoutException:
+        record["preview_response_seconds"] = round(clock() - start, 4)
+        return timed_out("inspect")
     record["preview_response_seconds"] = round(clock() - start, 4)
+    if remaining() <= 0:
+        return timed_out("inspect")
     if preview.status_code != 200:
         return failure("inspect", preview)
     plan = preview.json()
     target = next((item for item in plan["target_sheets"] if item["name"] == sheet), None)
     if target is None:
-        raise ValueError(f"目标模板没有工作表「{sheet}」")
+        record["status"] = "failed"
+        record["error"] = {"code": "sheet_not_found", "stage": "selection", "sheet": sheet,
+                           "detail": f"目标模板没有工作表「{sheet}」"}
+        return record
     if target.get("blocked_reason"):
-        raise ValueError(target["blocked_reason"])
+        record["status"] = "failed"
+        record["error"] = {"code": "blocked_sheet", "stage": "selection", "sheet": sheet,
+                           "detail": target["blocked_reason"]}
+        return record
     columns = {item["column"] for item in target["headers"]}
     if set(mapping) != columns:
-        raise ValueError(f"工作表「{sheet}」的列映射与预览表头不一致")
+        record["status"] = "failed"
+        record["error"] = {"code": "mapping_mismatch", "stage": "selection", "sheet": sheet,
+                           "detail": f"工作表「{sheet}」的列映射与预览表头不一致"}
+        return record
+    if remaining() <= 0:
+        return timed_out("fill")
     fill_start = clock()
-    filled = client.post("/templates/xlsx/fill", files=files, data={
-        "plan_id": plan["plan_id"], "sheet": sheet,
-        "mapping": json.dumps(mapping, ensure_ascii=False),
-    })
+    try:
+        filled = client.post("/templates/xlsx/fill", files=files, data={
+            "plan_id": plan["plan_id"], "sheet": sheet,
+            "mapping": json.dumps(mapping, ensure_ascii=False),
+        }, timeout=remaining())
+    except httpx.TimeoutException:
+        record["fill_request_seconds"] = round(clock() - fill_start, 4)
+        record["fill_complete_seconds"] = round(clock() - start, 4)
+        return timed_out("fill")
     record["fill_request_seconds"] = round(clock() - fill_start, 4)
     record["fill_complete_seconds"] = round(clock() - start, 4)
+    if remaining() <= 0:
+        return timed_out("fill")
     if filled.status_code != 200:
         return failure("fill", filled)
     result = filled.json()
     record["fill"] = {key: result[key] for key in ("result_id", "rows", "cells_written", "cells_empty")}
+    if remaining() <= 0:
+        return timed_out("download")
     download_start = clock()
-    downloaded = client.get(f"/operations/files/{result['result_id']}")
+    try:
+        downloaded = client.get(f"/operations/files/{result['result_id']}", timeout=remaining())
+    except httpx.TimeoutException:
+        record["download_request_seconds"] = round(clock() - download_start, 4)
+        record["download_complete_seconds"] = round(clock() - start, 4)
+        return timed_out("download")
     record["download_request_seconds"] = round(clock() - download_start, 4)
     record["download_complete_seconds"] = round(clock() - start, 4)
+    if remaining() <= 0:
+        return timed_out("download")
     if downloaded.status_code != 200:
         return failure("download", downloaded)
     record["download"] = {"bytes": len(downloaded.content),
@@ -140,7 +207,7 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
     return record
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="记录异步识别或受支持模板上传至下载的客户端耗时")
     parser.add_argument("source", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
@@ -170,6 +237,7 @@ def main() -> None:
                 client, args.source.read_bytes(), args.source.name,
                 args.uploaded_xlsx_template.read_bytes(), args.uploaded_xlsx_template.name,
                 args.template_sheet, mapping, download_to=args.download_to,
+                timeout=args.timeout,
             )
         else:
             result = capture(client, args.source.read_bytes(), args.source.name, metrics=args.metrics,
@@ -178,7 +246,8 @@ def main() -> None:
     args.record.parent.mkdir(parents=True, exist_ok=True)
     args.record.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["status"] == "succeeded" else 2 if result["status"] == "timed_out" else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -114,6 +114,7 @@ def get(store: Store, task_id: str) -> dict | None:
     if row is None:
         return None
     return {"task_id": row["id"], "doc": row["doc"], "source_sha256": row["source_sha256"],
+            "publication_id": row["request_id"],
             "status": row["status"], "submitted_at": row["submitted_at"],
             "started_at": row["started_at"], "finished_at": row["finished_at"],
             "result": json.loads(row["result"]) if row["result"] else None,

@@ -103,6 +103,63 @@ def test_sync_and_async_share_version_order(tmp_path, monkeypatch):
     assert [fact["value"] for fact in database.facts(NAME)] == ["120"]
 
 
+def test_same_bytes_reimport_does_not_supersede_waiting_task_or_clear_facts(tmp_path, monkeypatch):
+    database = Store(tmp_path / "duplicate.db")
+    monkeypatch.setattr(main, "store", database)
+    waiting, release = Event(), Event()
+
+    def delayed(content, name, metrics, store, *, audit, publish):
+        waiting.set()
+        assert release.wait(5)
+        return substitute(content, name, metrics, store, audit=audit, publish=publish)
+
+    monkeypatch.setattr(task_queue, "extract_document", delayed)
+    client = TestClient(main.app)
+    source = sample(90)
+    assert client.post("/ingest", files={"file": (NAME, source)}).status_code == 200
+    task_id = client.post("/tasks", files={"file": (NAME, source)}).json()["task_id"]
+    assert waiting.wait(2)
+    with database.connect() as db:
+        before = db.execute("SELECT request_id FROM published_versions WHERE doc=?", (NAME,)).fetchone()[0]
+    assert client.post("/ingest", files={"file": (NAME, source)}).status_code == 200
+    with database.connect() as db:
+        after = db.execute("SELECT request_id FROM published_versions WHERE doc=?", (NAME,)).fetchone()[0]
+    assert after == before
+    release.set()
+    finished = completed(client, task_id)
+    assert finished["status"] == "succeeded" and finished["is_current"]
+    assert [fact["value"] for fact in database.facts(NAME)] == ["90"]
+    assert client.post("/ingest", files={"file": (NAME, source)}).status_code == 200
+    assert [fact["value"] for fact in database.facts(NAME)] == ["90"]
+    assert completed(client, task_id)["is_current"]
+    assert client.post("/ingest", files={"file": (NAME, sample(120))}).status_code == 200
+    assert database.content(NAME) == sample(120) and database.facts(NAME) == []
+    assert not completed(client, task_id)["is_current"]
+
+
+def test_same_bytes_reimport_preserves_delayed_sync_extraction(tmp_path, monkeypatch):
+    database = Store(tmp_path / "duplicate-sync.db")
+    monkeypatch.setattr(main, "store", database)
+    waiting, release = Event(), Event()
+
+    def delayed(content, name, metrics, store, *, publish):
+        waiting.set()
+        assert release.wait(5)
+        return substitute(content, name, metrics, store, publish=publish)
+
+    monkeypatch.setattr(main, "extract_document", delayed)
+    client = TestClient(main.app)
+    assert client.post("/ingest", files={"file": (NAME, sample(90))}).status_code == 200
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, "/extract", files={"file": (NAME, sample(90))})
+        assert waiting.wait(2)
+        assert client.post("/ingest", files={"file": (NAME, sample(90))}).status_code == 200
+        release.set()
+        response = future.result(timeout=5)
+    assert response.status_code == 200 and response.json()["kept"] == 1
+    assert [fact["value"] for fact in database.facts(NAME)] == ["90"]
+
+
 def test_final_failure_batch_after_successful_retry(tmp_path, monkeypatch):
     database = Store(tmp_path / "batches.db")
     monkeypatch.setattr(main, "store", database)

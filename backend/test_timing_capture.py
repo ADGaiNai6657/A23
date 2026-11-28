@@ -1,17 +1,22 @@
 """Client timing boundaries using the actual API and a model substitute."""
 
+import json
+import sys
 from hashlib import sha256
+from io import BytesIO
 
+import httpx
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 import extractor
 import main
 import task_queue
-from demo import DAILY_DOC, DAILY_TEMPLATE, build_demo
-from fill_spec import COVID_OUTPUT
+from demo import CITY_DOC, CITY_TEMPLATE, DAILY_DOC, DAILY_TEMPLATE, build_demo, prepare_demo_inputs
+from fill_spec import CITY_OUTPUT, COVID_OUTPUT
 from store import Store
 from test_xlsx_template import seven_column_template, synthetic_source
+import timing_capture
 from timing_capture import capture, capture_uploaded_xlsx, seconds_between
 
 
@@ -60,6 +65,107 @@ def test_timing_capture_failure_has_no_download(tmp_path, monkeypatch):
     assert record["fill_request_seconds"] is None and record["download_request_seconds"] is None
 
 
+def city_model_substitute(content, name, metrics, store, *, audit=None, publish=None):
+    is_gdp = "GDP" in metrics
+    fact = {"block_no": 1, "entity": "甲城", "metric": "GDP总量" if is_gdp else "常住人口",
+            "value": "100" if is_gdp else "20", "unit": "亿元" if is_gdp else "万人",
+            "snippet": "GDP总量100亿元" if is_gdp else "常住人口20万人"}
+    return extractor.extract_document(content, name, metrics, store, audit=audit, publish=publish,
+                                      respond=lambda _: {"facts": [fact]})
+
+
+def city_timing_inputs(tmp_path, monkeypatch):
+    inputs, outputs = tmp_path / "doc", tmp_path / "data"
+    prepare_demo_inputs(inputs)
+    outputs.mkdir()
+    database = Store(outputs / "a23.db")
+    monkeypatch.setattr(main, "store", database)
+    monkeypatch.setattr(main, "INPUTS", inputs)
+    monkeypatch.setattr(main, "DATA", outputs)
+    monkeypatch.setattr(main, "REFERENCE_DIR", inputs)
+    monkeypatch.setattr(main, "SYNTHETIC_REFERENCE", True)
+    monkeypatch.setattr(task_queue, "extract_document", city_model_substitute)
+    monkeypatch.setattr(main, "extract_document", city_model_substitute)
+    return inputs, outputs, database
+
+
+def test_fixed_timing_receipt_matches_fact_batch_and_download(tmp_path, monkeypatch):
+    inputs, outputs, database = city_timing_inputs(tmp_path, monkeypatch)
+    source = (inputs / CITY_DOC).read_bytes()
+    record = capture(TestClient(main.app), source, CITY_DOC, metrics="GDP",
+                     template_name=CITY_TEMPLATE, output_name=CITY_OUTPUT, poll_interval=0.01)
+    assert record["status"] == "succeeded"
+    assert record["publication_id"] == record["fill_publication_id"] == record["download"]["publication_id"]
+    assert record["publication_id"] == database.snapshot(CITY_DOC, with_facts=True)[3]
+    book = load_workbook(outputs / CITY_OUTPUT)
+    try:
+        assert book.active["B2"].value == 100 and book.active["C2"].value is None
+    finally:
+        book.close()
+    assert record["download"]["sha256"] == sha256((outputs / CITY_OUTPUT).read_bytes()).hexdigest()
+    assert json.loads((outputs / "fill_report.json").read_text())["publication_id"] == record["publication_id"]
+
+
+def test_fixed_timing_rejects_same_sha_newer_fact_batch(tmp_path, monkeypatch):
+    inputs, outputs, database = city_timing_inputs(tmp_path, monkeypatch)
+    source = (inputs / CITY_DOC).read_bytes()
+    inner = TestClient(main.app)
+
+    class InterleavingClient:
+        def post(self, path, **kwargs):
+            if path == "/fill":
+                newer = inner.post("/extract", files={"file": (CITY_DOC, source)}, data={"metrics": "人口"})
+                assert newer.status_code == 200, newer.text
+            return inner.post(path, **kwargs)
+
+        def get(self, path, **kwargs):
+            return inner.get(path, **kwargs)
+
+    record = capture(InterleavingClient(), source, CITY_DOC, metrics="GDP",
+                     template_name=CITY_TEMPLATE, output_name=CITY_OUTPUT, poll_interval=0.01)
+    assert record["task_status"] == "succeeded" and record["status"] == "version_conflict"
+    assert record["error"]["code"] == "version_conflict"
+    assert record["fill_publication_id"] is None and record["download"] is None
+    assert not (outputs / CITY_OUTPUT).exists()
+    assert {fact["metric"] for fact in database.facts(CITY_DOC)} == {"常住人口"}
+
+
+def test_fixed_timing_rejects_replaced_download_even_with_identical_cells(tmp_path, monkeypatch):
+    inputs, outputs, database = city_timing_inputs(tmp_path, monkeypatch)
+    source = (inputs / CITY_DOC).read_bytes()
+    inner = TestClient(main.app)
+    newer_id = old_id = None
+
+    class InterleavingClient:
+        def post(self, path, **kwargs):
+            return inner.post(path, **kwargs)
+
+        def get(self, path, **kwargs):
+            nonlocal newer_id, old_id
+            if path == "/files":
+                old_id = kwargs["params"]["result_id"]
+                newer = inner.post("/extract", files={"file": (CITY_DOC, source)},
+                                   data={"metrics": "GDP"})
+                assert newer.status_code == 200
+                replacement = inner.post("/fill", json={"doc": CITY_DOC, "template": CITY_TEMPLATE,
+                                                        "source_sha256": sha256(source).hexdigest()})
+                assert replacement.status_code == 200
+                newer_id = replacement.headers["X-A23-Result-ID"]
+            return inner.get(path, **kwargs)
+
+    record = capture(InterleavingClient(), source, CITY_DOC, metrics="GDP",
+                     template_name=CITY_TEMPLATE, output_name=CITY_OUTPUT, poll_interval=0.01)
+    assert record["task_status"] == "succeeded" and record["status"] == "version_conflict"
+    assert record["error"]["code"] == "version_conflict" and record["download"] is None
+    assert newer_id != old_id
+    assert json.loads((outputs / "fill_report.json").read_text())["publication_id"] != record["publication_id"]
+    book = load_workbook(outputs / CITY_OUTPUT)
+    try:
+        assert book.active["B2"].value == 100
+    finally:
+        book.close()
+
+
 def test_server_timing_durations_have_explicit_units():
     assert seconds_between("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01.250+00:00") == 1.25
     assert seconds_between(None, "2026-01-01T00:00:00+00:00") is None
@@ -99,3 +205,123 @@ def test_uploaded_template_timing_records_preview_rejection(tmp_path):
     assert record["error"]["http_status"] == 400 and "E2" in record["error"]["detail"]
     assert record["fill"] is None and record["download"] is None
     assert not destination.exists()
+
+
+def test_uploaded_template_timing_records_blocked_selected_sheet(tmp_path):
+    book = load_workbook(BytesIO(seven_column_template(blocked=True)))
+    valid = book.copy_worksheet(book["目标"])
+    valid.title = "可填"
+    valid["E2"] = None
+    output = BytesIO()
+    book.save(output)
+    book.close()
+    destination = tmp_path / "不应生成.xlsx"
+    record = capture_uploaded_xlsx(TestClient(main.app), synthetic_source(), "源.xlsx",
+                                   output.getvalue(), "双表.xlsx", "目标", XLSX_MAPPING,
+                                   download_to=destination)
+    assert record["status"] == "failed" and record["error"] == {
+        "code": "blocked_sheet", "stage": "selection", "sheet": "目标",
+        "detail": record["error"]["detail"],
+    }
+    assert "E2" in record["error"]["detail"] and record["preview_response_seconds"] is not None
+    assert record["fill"] is None and not destination.exists()
+
+
+def test_uploaded_template_timeout_covers_each_stage(tmp_path):
+    source, template = synthetic_source(), seven_column_template()
+
+    class FakeClock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    for stage, slow_path in (("inspect", "/templates/xlsx/inspect"),
+                             ("fill", "/templates/xlsx/fill"),
+                             ("download", "/operations/files/")):
+        clock = FakeClock()
+        inner = TestClient(main.app)
+
+        class SlowClient:
+            def post(self, path, **kwargs):
+                if path == slow_path:
+                    clock.value += 0.02
+                return inner.post(path, **kwargs)
+
+            def get(self, path, **kwargs):
+                if path.startswith(slow_path):
+                    clock.value += 0.02
+                return inner.get(path, **kwargs)
+
+        destination = tmp_path / f"{stage}.xlsx"
+        record = capture_uploaded_xlsx(SlowClient(), source, "源.xlsx", template, "目标.xlsx",
+                                       "目标", XLSX_MAPPING, download_to=destination,
+                                       timeout=0.01, clock=clock)
+        assert record["status"] == "timed_out" and record["error"]["stage"] == stage
+        assert record["error"]["code"] == "timeout"
+        assert record["error"]["elapsed_seconds"] == 0.02
+        assert record["download"] is None and not destination.exists()
+
+
+def test_uploaded_template_transport_timeout_records_stage(tmp_path):
+    source, template = synthetic_source(), seven_column_template()
+    inner = TestClient(main.app)
+    for stage, path in (("inspect", "/templates/xlsx/inspect"),
+                        ("fill", "/templates/xlsx/fill"),
+                        ("download", "/operations/files/")):
+        class TimeoutClient:
+            def post(self, url, **kwargs):
+                if url == path:
+                    raise httpx.ReadTimeout("受控超时")
+                return inner.post(url, **kwargs)
+
+            def get(self, url, **kwargs):
+                if url.startswith(path):
+                    raise httpx.ReadTimeout("受控超时")
+                return inner.get(url, **kwargs)
+
+        destination = tmp_path / f"transport-{stage}.xlsx"
+        record = capture_uploaded_xlsx(TimeoutClient(), source, "源.xlsx", template,
+                                       "目标.xlsx", "目标", XLSX_MAPPING,
+                                       download_to=destination, timeout=1)
+        assert record["status"] == "timed_out"
+        assert record["error"]["stage"] == stage
+        assert record["download"] is None and not destination.exists()
+
+
+def test_uploaded_template_cli_writes_blocked_sheet_record(tmp_path, monkeypatch, capsys):
+    book = load_workbook(BytesIO(seven_column_template(blocked=True)))
+    valid = book.copy_worksheet(book["目标"])
+    valid.title = "可填"
+    valid["E2"] = None
+    template = tmp_path / "双表.xlsx"
+    book.save(template)
+    book.close()
+    source = tmp_path / "源.xlsx"
+    source.write_bytes(synthetic_source())
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text(json.dumps(XLSX_MAPPING), encoding="utf-8")
+    record_path = tmp_path / "failure.json"
+
+    class LocalClient:
+        def __init__(self, **kwargs):
+            self.client = TestClient(main.app)
+
+        def __enter__(self):
+            return self.client
+
+        def __exit__(self, *args):
+            self.client.close()
+
+    monkeypatch.setattr(timing_capture.httpx, "Client", LocalClient)
+    monkeypatch.setattr(sys, "argv", ["timing_capture.py", str(source),
+                                     "--uploaded-xlsx-template", str(template),
+                                     "--template-sheet", "目标", "--mapping-json", str(mapping),
+                                     "--record", str(record_path)])
+    assert timing_capture.main() == 1
+    assert capsys.readouterr().out
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["status"] == "failed"
+    assert record["error"]["stage"] == "selection"
+    assert record["error"]["sheet"] == "目标"
+    assert "E2" in record["error"]["detail"]

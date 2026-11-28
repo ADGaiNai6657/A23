@@ -62,18 +62,21 @@ class Store:
         source_sha256 = hashlib.sha256(content).hexdigest()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            same_document = self._write_document(db, parsed, content, mode, facts)
+            if mode is None and same_document:
+                # Reimporting identical bytes and blocks does not publish a new version.
+                return
             request = db.execute(
                 "INSERT INTO extraction_requests(doc, source_sha256) VALUES (?, ?)",
                 (parsed.file, source_sha256),
             )
-            self._write_document(db, parsed, content, mode, facts)
             db.execute("""INSERT INTO published_versions VALUES (?, ?, ?)
                           ON CONFLICT(doc) DO UPDATE SET request_id=excluded.request_id,
                           source_sha256=excluded.source_sha256""",
                        (parsed.file, request.lastrowid, source_sha256))
 
     @staticmethod
-    def _write_document(db, parsed: ParsedDoc, content: bytes, mode: str | None, facts) -> None:
+    def _write_document(db, parsed: ParsedDoc, content: bytes, mode: str | None, facts) -> bool:
         digest = hashlib.sha256(content).hexdigest()
         if parsed.file.lower().endswith((".txt", ".md")):
             digest = "line-number:" + digest
@@ -81,9 +84,9 @@ class Store:
             (block_no, block.type, block.text, json.dumps(block.locator, ensure_ascii=False, sort_keys=True))
             for block_no, block in parsed.numbered_blocks()
         ]
-        current = db.execute("SELECT digest FROM documents WHERE name = ?", (parsed.file,)).fetchone()
+        current = db.execute("SELECT digest, content FROM documents WHERE name = ?", (parsed.file,)).fetchone()
         same_blocks = False
-        if current is not None and current["digest"] == digest:
+        if current is not None and current["digest"] == digest and current["content"] == content:
             saved = [
                 (row["number"], row["type"], row["text"],
                  json.dumps(json.loads(row["locator"]), ensure_ascii=False, sort_keys=True))
@@ -101,6 +104,7 @@ class Store:
             db.execute("DELETE FROM facts WHERE doc = ? AND mode = ?", (parsed.file, mode))
             db.executemany("INSERT INTO facts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            ((parsed.file, mode, *fact) for fact in facts))
+        return same_blocks
 
     def register_extraction(self, doc: str, content: bytes) -> int:
         with self.connect() as db:
@@ -194,13 +198,20 @@ class Store:
             args = (doc,)
         return [dict(row) for row in db.execute(statement + " ORDER BY doc, block_no, rowid", args)]
 
-    def snapshot(self, doc: str, *, with_facts: bool) -> tuple[bytes, list[dict], list[dict]] | None:
+    def snapshot(self, doc: str, *, with_facts: bool, expected_publication_id: int | None = None
+                 ) -> tuple[bytes, list[dict], list[dict], int | None] | None:
         with self.connect() as db:
             db.execute("BEGIN")
             row = db.execute("SELECT content FROM documents WHERE name = ?", (doc,)).fetchone()
             if row is None:
                 return None
-            return row["content"], self._blocks(db, doc), self._facts(db, doc) if with_facts else []
+            publication = db.execute("SELECT request_id FROM published_versions WHERE doc = ?",
+                                     (doc,)).fetchone()
+            publication_id = publication["request_id"] if publication else None
+            if expected_publication_id is not None and publication_id != expected_publication_id:
+                raise ValueError("事实版本冲突：已发布的抽取批次改变，请重新识别并填写")
+            return (row["content"], self._blocks(db, doc),
+                    self._facts(db, doc) if with_facts else [], publication_id)
 
     def block(self, doc: str, number: int) -> dict | None:
         with self.connect() as db:
