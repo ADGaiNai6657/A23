@@ -22,6 +22,7 @@ from filler import block_digest, fill_workbook, resolve_facts
 import operations
 import air_quality
 import xlsx_template
+import scoped_template
 import task_queue
 from parsers import leaf_name, parse_document
 from schema import ExtractResult, FactDecisionRequest, FillRequest, ParsedDoc
@@ -117,6 +118,77 @@ def extraction_task(task_id: str) -> dict:
     if task is None:
         raise HTTPException(404, "没有这条识别任务")
     return task
+
+
+@app.post("/workspace/import", status_code=202)
+def batch_import(files: Annotated[list[UploadFile], File()],
+                 metrics: Annotated[str, Form()] = "") -> dict:
+    if not 1 <= len(files) <= 8:
+        raise HTTPException(400, "每批请选择 1 至 8 份资料")
+    prepared = []
+    for file in files:
+        try:
+            name = leaf_name(file.filename or "")
+            content = file.file.read()
+            if not content or len(content) > operations.MAX_FILE_BYTES:
+                raise ValueError("文件为空或超过 12 MB")
+            parse_document(content, name)
+        except (ValueError, BadZipFile, InvalidFileException) as error:
+            raise HTTPException(400, f"资料「{file.filename}」无法解析：{error}") from error
+        prepared.append((name, content))
+    if len({name for name, _ in prepared}) != len(prepared):
+        raise HTTPException(400, "同批资料文件名不能重复，请先重命名")
+    tasks = []
+    for name, content in prepared:
+        try:
+            tasks.append({"doc": name, **task_queue.submit(store, content, name, metrics)})
+        except ValueError as error:
+            raise HTTPException(400, f"资料「{name}」提交失败：{error}；已提交任务可继续查询") from error
+    return {"tasks": tasks}
+
+
+@app.get("/workspace/sources")
+def workspace_sources() -> dict:
+    return {"sources": store.sources()}
+
+
+@app.post("/workspace/templates/inspect")
+def inspect_scoped_template(template: Annotated[UploadFile, File()]) -> dict:
+    try:
+        content = template.file.read()
+        name = leaf_name(template.filename or "")
+        return {"name": name, "template_sha256": sha256(content).hexdigest(),
+                "targets": scoped_template.structure(content, name)}
+    except (ValueError, BadZipFile, InvalidFileException) as error:
+        raise HTTPException(400, str(error)) from error
+    except Exception as error:
+        logger.exception("跨文档模板结构预览失败")
+        raise HTTPException(400, "无法读取 Word 或 Excel 模板，请检查文件格式") from error
+
+
+@app.post("/workspace/templates/preview")
+def preview_scoped_template(template: Annotated[UploadFile, File()],
+                            docs: Annotated[str, Form()], target: Annotated[str, Form()],
+                            entity_column: Annotated[int, Form()], mapping: Annotated[str, Form()]) -> dict:
+    try:
+        return scoped_template.preview(store, template.file.read(), leaf_name(template.filename or ""),
+                                       json.loads(docs), target, entity_column, json.loads(mapping))
+    except (ValueError, TypeError, BadZipFile, InvalidFileException) as error:
+        raise HTTPException(400, f"跨文档填写预览失败：{error}") from error
+    except Exception as error:
+        logger.exception("跨文档填写计划预览失败")
+        raise HTTPException(400, "无法生成跨文档填写计划，请核对目标表和映射") from error
+
+
+@app.post("/workspace/templates/fill")
+def fill_scoped_template(template: Annotated[UploadFile, File()], plan_id: Annotated[str, Form()]) -> dict:
+    try:
+        return scoped_template.fill(store, template.file.read(), leaf_name(template.filename or ""), plan_id)
+    except (ValueError, BadZipFile, InvalidFileException) as error:
+        raise HTTPException(409 if "版本" in str(error) or "失效" in str(error) else 400, str(error)) from error
+    except Exception as error:
+        logger.exception("跨文档模板填写失败")
+        raise HTTPException(400, "模板处理失败，未生成结果副本") from error
 
 
 @app.post("/operations/preview")

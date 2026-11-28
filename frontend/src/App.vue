@@ -86,6 +86,20 @@ const xlsxSheetInfo = computed(() => xlsxPlan.value?.target_sheets.find(item => 
 const xlsxSelectedCell = computed(() => xlsxResult.value?.cells.find(
   item => item.row === Number(xlsxRow.value) && item.column === Number(xlsxColumn.value),
 ))
+const batchFiles = ref([])
+const batchTasks = ref([])
+const workspaceSources = ref([])
+const selectedDocs = ref([])
+const scopedTemplate = ref(null)
+const scopedInspect = ref(null)
+const scopedTarget = ref('')
+const entityColumn = ref(1)
+const scopedMapping = ref({})
+const scopedPlan = ref(null)
+const scopedResult = ref(null)
+const scopedCellIndex = ref(0)
+const selectedScopedTarget = computed(() => scopedInspect.value?.targets.find(item => item.id === scopedTarget.value))
+const selectedScopedCell = computed(() => scopedResult.value?.cells[scopedCellIndex.value])
 
 async function checkHealth() {
   try {
@@ -96,6 +110,90 @@ async function checkHealth() {
 }
 
 onMounted(checkHealth)
+onMounted(refreshWorkspaceSources)
+
+async function refreshWorkspaceSources() {
+  try {
+    workspaceSources.value = (await api.workspaceSources()).sources
+    selectedDocs.value = selectedDocs.value.filter(doc => workspaceSources.value.some(item => item.doc === doc))
+  } catch {
+    workspaceSources.value = []
+  }
+}
+
+function chooseBatchFiles(event) {
+  batchFiles.value = [...event.target.files]
+  batchTasks.value = []
+  event.target.value = ''
+}
+
+function importBatch() {
+  if (!batchFiles.value.length) {
+    feedback.value.workspace = { error: true, text: '请先选择源文件。' }
+    return
+  }
+  if (!window.confirm('批量识别会将所选资料发送到 DeepSeek 并产生 API 用量。继续吗？')) return
+  return run('workspace', '正在提交批量识别', async () => {
+    batchTasks.value = (await api.workspaceImport(batchFiles.value, metrics.value)).tasks
+    feedback.value.workspace = { text: `已提交 ${batchTasks.value.length} 份资料。请刷新任务状态。` }
+  })
+}
+
+function refreshBatchTasks() {
+  return run('workspace', '正在查询识别任务', async () => {
+    batchTasks.value = await Promise.all(batchTasks.value.map(async item => ({
+      ...item, ...(await api.workspaceTask(item.task_id)),
+    })))
+    await refreshWorkspaceSources()
+    feedback.value.workspace = { text: '已更新任务状态和可选资料。' }
+  })
+}
+
+function chooseScopedTemplate(event) {
+  scopedTemplate.value = event.target.files[0] ?? null
+  scopedInspect.value = scopedPlan.value = scopedResult.value = null
+}
+
+function selectScopedTarget() {
+  scopedPlan.value = scopedResult.value = null
+  scopedMapping.value = Object.fromEntries((selectedScopedTarget.value?.headers ?? [])
+    .map((label, index) => [index + 1, { metric: label, period: '', scope: '', unit: '' }])
+    .filter(([column]) => column !== Number(entityColumn.value)))
+}
+
+function inspectScopedTemplate() {
+  if (!scopedTemplate.value) return
+  return run('workspace', '正在预览模板结构', async () => {
+    scopedInspect.value = await api.workspaceInspect(scopedTemplate.value)
+    scopedTarget.value = scopedInspect.value.targets[0]?.id ?? ''
+    entityColumn.value = 1
+    selectScopedTarget()
+    feedback.value.workspace = { text: '请确认目标表、实体列、字段、期次和资料范围。' }
+  })
+}
+
+function previewScopedFill() {
+  if (!selectedDocs.value.length || !scopedTemplate.value) {
+    feedback.value.workspace = { error: true, text: '请选择至少一份资料及模板。' }
+    return
+  }
+  return run('workspace', '正在查询跨文档候选', async () => {
+    scopedPlan.value = await api.workspacePreview(scopedTemplate.value, selectedDocs.value,
+      scopedTarget.value, entityColumn.value, scopedMapping.value)
+    scopedResult.value = null
+    feedback.value.workspace = { text: '请核对候选、拒填原因及来源版本，再确认填写。' }
+  })
+}
+
+function fillScopedTemplate() {
+  if (!scopedPlan.value) return
+  return run('workspace', '正在填写 Word 或 Excel 副本', async () => {
+    scopedResult.value = await api.workspaceFill(scopedTemplate.value, scopedPlan.value.plan_id)
+    scopedPlan.value = null
+    scopedCellIndex.value = 0
+    feedback.value.workspace = { text: '填写完成。请查看逐格来源并下载副本。' }
+  })
+}
 
 function selectLayout() {
   source.value = layout.value.doc
@@ -517,6 +615,105 @@ function fillXlsxTemplate() {
         <p v-else class="feedback" role="status">{{ pending?.area === 'fill' ? `${pending.label}…` : feedback.fill?.text }}</p>
       </section>
     </div>
+
+    <section class="panel operation-panel" aria-labelledby="workspace-flow-heading">
+      <header class="panel-heading">
+        <span class="panel-icon" aria-hidden="true"><span class="icon icon-grid"></span></span>
+        <div>
+          <h2 id="workspace-flow-heading">跨文档模板填写</h2>
+          <p>批量识别资料，选择取数范围，再上传规整的 Word 表格或 Excel 工作表。</p>
+        </div>
+      </header>
+      <div class="operation-form">
+        <fieldset :disabled="Boolean(pending)">
+          <label class="field"><span>批量源文件（最多 8 份）</span>
+            <input type="file" accept=".txt,.md,.docx,.xlsx" multiple @change="chooseBatchFiles">
+          </label>
+          <p v-if="batchFiles.length">已选：{{ batchFiles.map(item => item.name).join('、') }}</p>
+          <button class="button button-secondary" type="button" @click="importBatch">提交批量识别</button>
+          <button class="button button-secondary" type="button" @click="refreshBatchTasks">刷新任务状态</button>
+          <button class="button button-secondary" type="button" @click="refreshWorkspaceSources">刷新资料列表</button>
+        </fieldset>
+      </div>
+      <p class="feedback">批量识别会调用 DeepSeek；任务成功并入库后才能作为取数来源。</p>
+      <p v-if="feedback.workspace?.error" class="feedback feedback-error" role="alert">{{ feedback.workspace.text }}</p>
+      <p v-else class="feedback" role="status">{{ pending?.area === 'workspace' ? `${pending.label}…` : feedback.workspace?.text }}</p>
+      <ul v-if="batchTasks.length">
+        <li v-for="item in batchTasks" :key="item.task_id">{{ item.doc }}：{{ item.status }}；任务 {{ item.task_id }}<span v-if="item.error">；{{ item.error.message }}</span></li>
+      </ul>
+
+      <fieldset class="operation-form" :disabled="Boolean(pending)">
+        <legend>选择资料范围</legend>
+        <label v-for="item in workspaceSources" :key="item.doc" class="field">
+          <span><input v-model="selectedDocs" type="checkbox" :value="item.doc" :disabled="!item.fact_count">
+            {{ item.doc }} · {{ item.fact_count }} 条事实 · 发布号 {{ item.publication_id ?? '—' }}</span>
+        </label>
+        <p v-if="!workspaceSources.length">库中还没有可选资料。</p>
+      </fieldset>
+
+      <form class="operation-form" @submit.prevent="inspectScopedTemplate">
+        <fieldset :disabled="Boolean(pending)">
+          <label class="field"><span>上传未预置 Word 或 Excel 模板</span>
+            <input type="file" accept=".docx,.xlsx" required @change="chooseScopedTemplate">
+          </label>
+          <button class="button button-primary" type="submit">预览目标表和表头</button>
+        </fieldset>
+      </form>
+
+      <div v-if="scopedInspect" class="operation-review">
+        <h3>确认字段映射</h3>
+        <label class="field"><span>目标表或工作表</span>
+          <select v-model="scopedTarget" @change="selectScopedTarget">
+            <option v-for="target in scopedInspect.targets" :key="target.id" :value="target.id">
+              {{ target.label }} · {{ target.rows }} 行
+            </option>
+          </select>
+        </label>
+        <label class="field"><span>实体列</span>
+          <select v-model.number="entityColumn" @change="selectScopedTarget">
+            <option v-for="(label, index) in selectedScopedTarget?.headers ?? []" :key="index" :value="index + 1">
+              第 {{ index + 1 }} 列 · {{ label || '空表头' }}
+            </option>
+          </select>
+        </label>
+        <div v-for="(label, index) in selectedScopedTarget?.headers ?? []" :key="index">
+          <div v-if="index + 1 !== entityColumn && scopedMapping[index + 1]" class="field">
+            <strong>第 {{ index + 1 }} 列「{{ label }}」</strong>
+            <label>指标 <input v-model="scopedMapping[index + 1].metric" type="text"></label>
+            <label>期次 <input v-model="scopedMapping[index + 1].period" type="text" placeholder="例如 2025"></label>
+            <label>口径 <input v-model="scopedMapping[index + 1].scope" type="text" placeholder="可留空"></label>
+            <label>单位 <input v-model="scopedMapping[index + 1].unit" type="text" placeholder="可留空"></label>
+          </div>
+        </div>
+        <button class="button button-secondary" type="button" :disabled="Boolean(pending)" @click="previewScopedFill">查询候选并预览填写</button>
+      </div>
+
+      <div v-if="scopedPlan" class="operation-review">
+        <h3>待确认的跨文档计划</h3>
+        <p>{{ scopedPlan.cells_written }} 格可填，{{ scopedPlan.cells_empty }} 格留空；范围：{{ scopedPlan.docs.join('、') }}</p>
+        <ol><li v-for="item in scopedPlan.cells" :key="`${item.row}-${item.column}`">
+          第 {{ item.row }} 行第 {{ item.column }} 列 · {{ item.entity }} / {{ item.metric }}：{{ item.value ?? '留空' }}；{{ item.reason }}
+          <span v-if="item.source">；来源 {{ item.source.doc }} 第 {{ item.source.block_no }} 块</span>
+          <span v-if="item.candidates.length > 1">；候选 {{ item.candidates.map(source => `${source.doc}:${source.value}`).join('、') }}</span>
+        </li></ol>
+        <button class="button button-primary" type="button" :disabled="Boolean(pending)" @click="fillScopedTemplate">确认映射并填写副本</button>
+      </div>
+
+      <div v-if="scopedResult" class="operation-review">
+        <h3>跨文档填写结果</h3>
+        <p>{{ scopedResult.cells_written }} 格已填，{{ scopedResult.cells_empty }} 格留空；填写 {{ scopedResult.fill_seconds }} 秒。</p>
+        <a class="button button-secondary" :href="api.operationDownload(scopedResult.result_id)" download>下载 Word / Excel 副本</a>
+        <label class="field"><span>逐格追溯</span>
+          <select v-model.number="scopedCellIndex">
+            <option v-for="(item, index) in scopedResult.cells" :key="index" :value="index">第 {{ item.row }} 行第 {{ item.column }} 列 · {{ item.entity }} / {{ item.metric }}</option>
+          </select>
+        </label>
+        <p v-if="selectedScopedCell">{{ selectedScopedCell.value ?? '真空格' }}；{{ selectedScopedCell.reason }}
+          <span v-if="selectedScopedCell.source">；{{ selectedScopedCell.source.doc }} 第 {{ selectedScopedCell.source.block_no }} 块 {{ JSON.stringify(selectedScopedCell.source.locator) }}；原文 {{ selectedScopedCell.source.snippet }}；原值 {{ selectedScopedCell.source.value }} {{ selectedScopedCell.source.unit }}</span>
+          <span v-else-if="selectedScopedCell.candidates.length">；候选 {{ selectedScopedCell.candidates.map(item => `${item.doc} ${item.value}`).join('、') }}</span>
+        </p>
+      </div>
+    </section>
 
     <section class="panel operation-panel" aria-labelledby="operation-heading">
       <header class="panel-heading">

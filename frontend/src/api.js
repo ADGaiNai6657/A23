@@ -78,4 +78,32 @@ export const api = {
     body.append('mapping', JSON.stringify(mapping))
     return send('/templates/xlsx/fill', { method: 'POST', body })
   },
+  workspaceImport: (files, metrics) => {
+    const body = new FormData()
+    for (const file of files) body.append('files', file)
+    body.append('metrics', metrics)
+    return send('/workspace/import', { method: 'POST', body })
+  },
+  workspaceTask: (taskId) => send(`/tasks/${encodeURIComponent(taskId)}`),
+  workspaceSources: () => send('/workspace/sources'),
+  workspaceInspect: (template) => {
+    const body = new FormData()
+    body.append('template', template)
+    return send('/workspace/templates/inspect', { method: 'POST', body })
+  },
+  workspacePreview: (template, docs, target, entityColumn, mapping) => {
+    const body = new FormData()
+    body.append('template', template)
+    body.append('docs', JSON.stringify(docs))
+    body.append('target', target)
+    body.append('entity_column', String(entityColumn))
+    body.append('mapping', JSON.stringify(mapping))
+    return send('/workspace/templates/preview', { method: 'POST', body })
+  },
+  workspaceFill: (template, planId) => {
+    const body = new FormData()
+    body.append('template', template)
+    body.append('plan_id', planId)
+    return send('/workspace/templates/fill', { method: 'POST', body })
+  },
 }

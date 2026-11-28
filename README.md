@@ -108,6 +108,12 @@ $env:A23_SYNTHETIC_REFERENCE = "1"
 
 公开原文评分以逐格报告的 `source_sha256`、`publication_id`、`block_count`、`result_id` 和 `workbook_sha256` 作为填写版凭据。Web 评分一次读取并校验公开原文字节，再从这份字节计算 DOCX 或 XLSX 预期值；离线验收从填表所用的入库原文字节计算预期值。Web 评分若仍能核对当前文档版本，`database_sha256` 带 `database_sha256_stage=web_scoring_after_fill` 和 `database_sha256_observed_at`，仅表示评分时的整库状态与采集时间；目标文档已换版时省去该摘要并标记 `database_status=changed_after_fill`。离线同库和历史重建的整库摘要标记 `offline_post_extraction_pre_fill`，同样记录采集时间，验收器仍将其与交付数据库逐字节摘要核对。无关文档在填写后写入会改变 Web 评分阶段的整库摘要，但不改变填写版凭据。
 
+## 跨文档 Word/Excel 模板主流程首版
+
+在工作台「跨文档模板填写」一次选择最多 8 份 TXT、Markdown、DOCX 或 XLSX，提交批量异步识别并刷新任务状态。识别使用已配置的 DeepSeek，实际提交前页面会提示 API 用量；自动化验收用模型替身。任务成功后刷新资料列表，勾选本次允许取数的文档。上传未预置的 DOCX 或 XLSX 模板，选择 Word 表格或 Excel 工作表、实体列，再逐列确认指标、期次、口径和可选单位。预览会显示每格的候选、拟写值、来源与拒填理由；确认后填写副本，页面可逐格追溯并下载。接口依次为 `POST /workspace/import`、`GET /tasks/{task_id}`、`GET /workspace/sources`、`POST /workspace/templates/inspect`、`POST /workspace/templates/preview`、`POST /workspace/templates/fill`，下载沿用 `GET /operations/files/{result_id}`。
+
+首版要求表头连续清楚、每行有实体名称、目标值格为空，最多 20 列和 500 行。Word 支持规整的物理表格；Excel 按连续表头与数据行确定写入区域，范围外备注及其他工作表保持原样。数值事实按实体、指标、期次、口径和可选单位查找；只使用勾选文档的事实。同口径不同值拒填，缺失或不能安全写入的值也留真空格。每格记录源文件摘要、发布号、原文块及位置；确认计划绑定模板及所选资料版本，版本变化后需重新预览。计划和副本沿用单进程 30 分钟暂存，当前不覆盖复杂合并结构、任意文本变换或正式五套模板评分。
+
 ## 自然语言操作
 
 在工作台「自然语言操作」选择不超过 12 MB 的 DOCX 或 XLSX，输入中文指令后点「识别并预览」。预览会把文档内容及指令发送到已配置的 DeepSeek，页面先询问是否继续。核对操作列表中的目标位置、原内容和预期结果，再点「确认并执行」。成功后逐项显示执行结果，编辑或排版任务可下载文件副本。提取任务直接显示原文和第几段或工作表单元格位置。

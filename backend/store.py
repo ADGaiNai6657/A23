@@ -162,6 +162,37 @@ class Store:
         with self.connect() as db:
             return self._facts(db, doc)
 
+    def scoped_facts(self, docs: list[str]) -> tuple[dict[str, dict], list[dict]]:
+        """Read selected source versions, facts and block locations in one SQLite snapshot."""
+        with self.connect() as db:
+            db.execute("BEGIN")
+            versions = {}
+            locations = {}
+            for doc in docs:
+                row = db.execute("""SELECT documents.content, published_versions.request_id
+                                    FROM documents LEFT JOIN published_versions
+                                    ON published_versions.doc = documents.name
+                                    WHERE documents.name = ?""", (doc,)).fetchone()
+                if row is None:
+                    raise ValueError(f"所选资料「{doc}」尚未入库")
+                versions[doc] = {"source_sha256": hashlib.sha256(row["content"]).hexdigest(),
+                                 "publication_id": row["request_id"]}
+                locations[doc] = {block["number"]: block["locator"] for block in self._blocks(db, doc)}
+            facts = [{**fact, **versions[fact["doc"]],
+                      "locator": locations[fact["doc"]][fact["block_no"]]}
+                     for fact in self._facts(db, None) if fact["doc"] in versions]
+            return versions, facts
+
+    def sources(self) -> list[dict]:
+        """List documents available for a user-selected template scope."""
+        with self.connect() as db:
+            return [{"doc": row["name"], "source_sha256": hashlib.sha256(row["content"]).hexdigest(),
+                     "publication_id": row["request_id"], "fact_count": row["fact_count"]}
+                    for row in db.execute("""SELECT d.name, d.content, p.request_id,
+                                           (SELECT COUNT(*) FROM facts f WHERE f.doc = d.name) AS fact_count
+                                           FROM documents d LEFT JOIN published_versions p ON p.doc = d.name
+                                           ORDER BY d.name""")]
+
     def record_fact_decision(self, criteria: dict, decide: Callable[[list[dict]], dict]) -> dict:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
