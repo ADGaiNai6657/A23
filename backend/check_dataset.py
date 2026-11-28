@@ -3,7 +3,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from itertools import zip_longest
 from pathlib import Path
 from time import perf_counter
@@ -155,7 +155,9 @@ def verify_trace(store: Store, path: Path, locators: list[dict], columns: int) -
     return report
 
 
-def source_score(trace: dict, audit: dict, daily: bool, database_sha256: str | None) -> dict:
+def source_score(trace: dict, audit: dict, daily: bool, database_sha256: str | None,
+                 *, database_stage: str = "offline_post_extraction_pre_fill",
+                 database_observed_at: str | None = None) -> dict:
     score = {
         key: trace[key] for key in (
             "doc", "file", "result_id", "source_sha256", "template_sha256",
@@ -171,6 +173,9 @@ def source_score(trace: dict, audit: dict, daily: bool, database_sha256: str | N
     })
     if database_sha256 is not None:
         score["database_sha256"] = database_sha256
+        score["database_sha256_stage"] = database_stage
+        if database_observed_at is not None:
+            score["database_sha256_observed_at"] = database_observed_at
     else:
         score["database_status"] = "changed_after_fill"
     if daily:
@@ -206,12 +211,15 @@ def score_published_fill(root: Path, directory: Path, store: Store, file: str, d
     expected, _ = daily_expected(source_path) if daily else city_expected(source_path)
     audit = verify_workbook(directory / file, expected, 7 if daily else 5)
     database_sha256 = hashlib.sha256(store.path.read_bytes()).hexdigest()
+    database_observed_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     current = store.snapshot(doc, with_facts=False)
     if current is None or (hashlib.sha256(current[0]).hexdigest(), current[3]) != (
         trace["source_sha256"], trace.get("publication_id")
     ):
         database_sha256 = None
-    score = source_score(trace, audit, daily, database_sha256)
+    score = source_score(trace, audit, daily, database_sha256,
+                         database_stage="web_scoring_after_fill",
+                         database_observed_at=database_observed_at if database_sha256 else None)
     write_json(directory / report_name, score)
 
 
@@ -309,6 +317,7 @@ def check_dataset(root: Path, output: Path, extract: bool, archived_facts: Path 
     results = {}
     scores = {}
     database_sha256 = digest(store.path)
+    database_observed_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     for name, source, template, workbook, expected, locators, width in (
         ("01", CITY_SOURCE, city_template, CITY_OUTPUT, expected_city, city_locators, 5),
         ("03", DAILY_SOURCE, daily_template, COVID_OUTPUT, expected_daily, daily_locators, 7),
@@ -326,7 +335,8 @@ def check_dataset(root: Path, output: Path, extract: bool, archived_facts: Path 
                 raise ValueError(f"{name} 同库两次填写结果不一致")
             previous = current
         results[name] = {**current, "fill_seconds": timings, "block_count": len(store.blocks(source))}
-        scores[name] = source_score(trace, audit, name == "03", database_sha256)
+        scores[name] = source_score(trace, audit, name == "03", database_sha256,
+                                    database_observed_at=database_observed_at)
         write_json(output / score_file, scores[name])
         if hashlib.sha256(template.read_bytes()).hexdigest() != originals[template]:
             raise ValueError(f"模板原件出现变更：{template.name}")

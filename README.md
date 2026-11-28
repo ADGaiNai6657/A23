@@ -104,6 +104,10 @@ $env:A23_SYNTHETIC_REFERENCE = "1"
 
 对已支持的 03 形态上传 XLSX，可在计时前写好已复核的目标列映射 JSON，例如 `{"A":"date","B":"country","C":"continent","D":"gdp_per_capita","E":"population","F":"每日检测数","G":"病例数"}`。运行 `.venv/bin/python backend/timing_capture.py 源.xlsx --uploaded-xlsx-template 目标.xlsx --template-sheet 目标 --mapping-json 映射.json --download-to /tmp/a23-filled.xlsx --record /tmp/a23-template-timing.json --timeout 90`。`--timeout` 是从预览上传开始到下载完成的总秒数；预览、填写和下载各请求使用剩余预算，下载采用分块读取并在每块后核对总截止时间，超时后停止读取，记录 `timed_out`、阶段和已耗时，不发布本地下载文件。`fill_complete_seconds` 是填写响应到达的累计时间，`download_complete_seconds` 包括副本下载；记录源表、模板、映射和下载文件摘要。预览 HTTP 失败或所选工作表被预检拦截，也会写包含阶段、工作表和原因的 JSON。CLI 成功退出码为 0，失败为 1，超时为 2。此接口会在预览和填写时各上传一次源表，因此其计时包含源表重传。它为正式材料提供可复用的采集方式，但目前只覆盖 03 形态，不能代替赛题五套模板的实测与评分。
 
+计时边界按模式区分：独立识别从发送 `POST /tasks` 前开始，到首次观察任务终态结束；固定模板从同一提交点开始，到同版 XLSX 下载最后一字节结束；上传模板从发送预览请求前开始，到副本下载最后一字节结束。三个模式的 `--timeout` 都是覆盖各自全流程的总预算，阻塞中的首响、轮询、填写和下一数据块等待也受单调时钟截止点约束。`*_response_seconds` 与 `*_complete_seconds` 只在相应响应或完整结果实际到达时记录；失败与超时用 `*_request_seconds` 和 `error.elapsed_seconds` 留已用时间，尚未取得的任务 ID 为 `null`。断连等传输错误记录 `transport_error`、实际阶段并退出 1，预算到期记录 `timed_out` 并退出 2。
+
+公开原文评分以逐格报告的 `source_sha256`、`publication_id`、`block_count`、`result_id` 和 `workbook_sha256` 作为填写版凭据。Web 评分若仍能核对当前文档版本，`database_sha256` 带 `database_sha256_stage=web_scoring_after_fill` 和 `database_sha256_observed_at`，仅表示评分时的整库状态与采集时间；目标文档已换版时省去该摘要并标记 `database_status=changed_after_fill`。离线同库和历史重建的整库摘要标记 `offline_post_extraction_pre_fill`，同样记录采集时间，验收器仍将其与交付数据库逐字节摘要核对。无关文档在填写后写入会改变 Web 评分阶段的整库摘要，但不改变填写版凭据。
+
 ## 自然语言操作
 
 在工作台「自然语言操作」选择不超过 12 MB 的 DOCX 或 XLSX，输入中文指令后点「识别并预览」。预览会把文档内容及指令发送到已配置的 DeepSeek，页面先询问是否继续。核对操作列表中的目标位置、原内容和预期结果，再点「确认并执行」。成功后逐项显示执行结果，编辑或排版任务可下载文件副本。提取任务直接显示原文和第几段或工作表单元格位置。

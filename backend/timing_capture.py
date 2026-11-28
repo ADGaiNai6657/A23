@@ -2,12 +2,108 @@
 
 import argparse
 import json
+from queue import Empty, Queue
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from threading import Thread
 from time import monotonic, sleep
 
 import httpx
+
+
+class DeadlineExceeded(TimeoutError):
+    """The workflow's monotonic deadline elapsed while waiting for I/O."""
+
+
+def before_deadline(action, deadline: float, clock=monotonic):
+    """Bound a blocking HTTP operation by the workflow deadline, not an idle-read timeout."""
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise DeadlineExceeded
+    completed = Queue(maxsize=1)
+
+    def run():
+        try:
+            completed.put((True, action(remaining)))
+        except Exception as error:
+            completed.put((False, error))
+
+    Thread(target=run, daemon=True).start()
+    try:
+        success, result = completed.get(timeout=remaining)
+    except Empty as error:
+        raise DeadlineExceeded from error
+    if clock() >= deadline:
+        raise DeadlineExceeded
+    if not success:
+        raise result
+    return result
+
+
+def download_before_deadline(client, address: str, deadline: float, clock=monotonic,
+                             params: dict | None = None) -> tuple[int, object]:
+    """Read a response one chunk at a time, interrupting a wait that crosses the deadline."""
+    if not callable(getattr(client, "stream", None)):
+        response = before_deadline(lambda remaining: client.get(address, params=params, timeout=remaining),
+                                   deadline, clock)
+        return response.status_code, response.content if response.status_code == 200 else response
+
+    events, acknowledgements = Queue(), Queue(maxsize=1)
+    active = {}
+
+    def run():
+        try:
+            with client.stream("GET", address, params=params,
+                               timeout=max(deadline - clock(), 0.001)) as response:
+                active["response"] = response
+                if response.status_code != 200:
+                    response.read()
+                    events.put(("failure", response))
+                    return
+                events.put(("success", None))
+                for chunk in response.iter_bytes():
+                    events.put(("chunk", chunk))
+                    if not acknowledgements.get():
+                        return
+                events.put(("done", None))
+        except Exception as error:
+            events.put(("error", error))
+
+    def abort():
+        acknowledgements.put_nowait(False)
+        response = active.get("response")
+        close = getattr(response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except httpx.StreamError:
+                pass
+
+    Thread(target=run, daemon=True).start()
+    chunks = []
+    while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            abort()
+            raise DeadlineExceeded
+        try:
+            kind, value = events.get(timeout=remaining)
+        except Empty as error:
+            abort()
+            raise DeadlineExceeded from error
+        if clock() >= deadline:
+            abort()
+            raise DeadlineExceeded
+        if kind == "error":
+            raise value
+        if kind == "failure":
+            return value.status_code, value
+        if kind == "chunk":
+            chunks.append(value)
+            acknowledgements.put(True)
+        if kind == "done":
+            return 200, b"".join(chunks)
 
 
 def seconds_between(start: str | None, end: str | None) -> float | None:
@@ -27,6 +123,7 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
         raise ValueError("识别计时的 --timeout 必须大于 0 秒")
     started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     start = clock()
+    deadline = start + timeout
     record = {
         "schema_version": 1, "scope": "fixed_template_client" if template_name else "extraction_client",
         "source_name": source_name, "source_sha256": sha256(source).hexdigest(),
@@ -34,7 +131,8 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
         "publication_id": None, "fill_publication_id": None,
         "client_started_at": started_at,
         "task_source_sha256": None, "current_source_sha256": None, "is_current": None,
-        "first_response_seconds": None, "terminal_observed_seconds": None,
+        "submit_request_seconds": None, "first_response_seconds": None,
+        "poll_elapsed_seconds": None, "terminal_observed_seconds": None,
         "queue_seconds": None, "run_seconds": None,
         "fill_response_seconds": None, "fill_request_seconds": None,
         "download_complete_seconds": None, "download_request_seconds": None,
@@ -58,34 +156,50 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
                            "detail": f"计时超过 {timeout} 秒，停止于{stage}阶段"}
         return record
 
+    def disconnected(stage: str, error: httpx.RequestError) -> dict:
+        record["status"] = "failed"
+        record["error"] = {"code": "transport_error", "stage": stage,
+                           "elapsed_seconds": round(clock() - start, 4),
+                           "detail": f"HTTP 连接中断：{error}"}
+        return record
+
     try:
-        response = client.post("/tasks", files={"file": (source_name, source)},
-                               data={"metrics": metrics})
-    except httpx.TimeoutException:
-        record["first_response_seconds"] = round(clock() - start, 4)
+        response = before_deadline(
+            lambda remaining: client.post("/tasks", files={"file": (source_name, source)},
+                                          data={"metrics": metrics}, timeout=remaining), deadline, clock)
+    except (DeadlineExceeded, httpx.TimeoutException):
+        record["submit_request_seconds"] = round(clock() - start, 4)
         return timed_out("submit")
-    record["first_response_seconds"] = round(clock() - start, 4)
+    except httpx.RequestError as error:
+        record["submit_request_seconds"] = round(clock() - start, 4)
+        return disconnected("submit", error)
+    record["submit_request_seconds"] = record["first_response_seconds"] = round(clock() - start, 4)
     if response.status_code != 202:
         return failure("submit", response)
     task_id = response.json()["task_id"]
     record["task_id"] = task_id
     while True:
-        remaining = timeout - (clock() - start)
+        remaining = deadline - clock()
         if remaining <= 0:
-            record["terminal_observed_seconds"] = round(clock() - start, 4)
+            record["poll_elapsed_seconds"] = round(clock() - start, 4)
             return timed_out("poll")
         try:
-            status_response = client.get(f"/tasks/{task_id}", timeout=remaining)
-        except httpx.TimeoutException:
-            record["terminal_observed_seconds"] = round(clock() - start, 4)
+            status_response = before_deadline(
+                lambda budget: client.get(f"/tasks/{task_id}", timeout=budget), deadline, clock)
+        except (DeadlineExceeded, httpx.TimeoutException):
+            record["poll_elapsed_seconds"] = round(clock() - start, 4)
             return timed_out("poll")
-        record["terminal_observed_seconds"] = round(clock() - start, 4)
+        except httpx.RequestError as error:
+            record["poll_elapsed_seconds"] = round(clock() - start, 4)
+            return disconnected("poll", error)
+        record["poll_elapsed_seconds"] = round(clock() - start, 4)
         if status_response.status_code != 200:
             return failure("poll", status_response)
         task = status_response.json()
         if task["status"] in {"succeeded", "superseded", "failed"}:
+            record["terminal_observed_seconds"] = record["poll_elapsed_seconds"]
             break
-        pause(min(poll_interval, max(0, timeout - (clock() - start))))
+        pause(min(poll_interval, max(0, deadline - clock())))
     record.update({
         "status": task["status"], "task_status": task["status"],
         "publication_id": task["publication_id"],
@@ -116,13 +230,18 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
     if template_name and task["status"] == "succeeded":
         fill_start = clock()
         try:
-            filled = client.post("/fill", json={"doc": source_name, "template": template_name,
-                                                 "source_sha256": record["source_sha256"],
-                                                 "expected_publication_id": record["publication_id"]})
-        except httpx.TimeoutException:
+            filled = before_deadline(
+                lambda remaining: client.post("/fill", json={
+                    "doc": source_name, "template": template_name,
+                    "source_sha256": record["source_sha256"],
+                    "expected_publication_id": record["publication_id"],
+                }, timeout=remaining), deadline, clock)
+        except (DeadlineExceeded, httpx.TimeoutException):
             record["fill_request_seconds"] = round(clock() - fill_start, 4)
-            record["fill_response_seconds"] = round(clock() - start, 4)
             return timed_out("fill")
+        except httpx.RequestError as error:
+            record["fill_request_seconds"] = round(clock() - fill_start, 4)
+            return disconnected("fill", error)
         record["fill_request_seconds"] = round(clock() - fill_start, 4)
         record["fill_response_seconds"] = round(clock() - start, 4)
         if filled.status_code == 409:
@@ -140,24 +259,28 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
         result_id = filled.headers["X-A23-Result-ID"]
         download_start = clock()
         try:
-            downloaded = client.get("/files", params={"name": output_name, "result_id": result_id})
-        except httpx.TimeoutException:
+            status, payload = download_before_deadline(
+                client, "/files", deadline, clock,
+                params={"name": output_name, "result_id": result_id})
+        except (DeadlineExceeded, httpx.TimeoutException):
             record["download_request_seconds"] = round(clock() - download_start, 4)
-            record["download_complete_seconds"] = round(clock() - start, 4)
             return timed_out("download")
+        except httpx.RequestError as error:
+            record["download_request_seconds"] = round(clock() - download_start, 4)
+            return disconnected("download", error)
         record["download_request_seconds"] = round(clock() - download_start, 4)
-        record["download_complete_seconds"] = round(clock() - start, 4)
-        if downloaded.status_code == 409:
+        if status == 409:
             record["status"] = "version_conflict"
             record["error"] = {"code": "version_conflict",
-                               "message": downloaded.json().get("detail", "填写结果版本冲突")}
+                               "message": payload.json().get("detail", "填写结果版本冲突")}
             return record
-        if downloaded.status_code != 200:
-            return failure("download", downloaded)
+        if status != 200:
+            return failure("download", payload)
+        record["download_complete_seconds"] = round(clock() - start, 4)
         record["download"] = {"name": output_name, "result_id": result_id,
                               "publication_id": record["fill_publication_id"],
-                              "bytes": len(downloaded.content),
-                              "sha256": sha256(downloaded.content).hexdigest()}
+                              "bytes": len(payload),
+                              "sha256": sha256(payload).hexdigest()}
     return record
 
 
@@ -170,6 +293,7 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
         raise ValueError("上传模板计时的 --timeout 必须大于 0 秒")
     started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     start = clock()
+    deadline = start + timeout
     files = {"source": (source_name, source), "template": (template_name, template)}
     record = {
         "schema_version": 1, "scope": "uploaded_xlsx03_client", "client_started_at": started_at,
@@ -177,7 +301,8 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
         "template_name": template_name, "template_sha256": sha256(template).hexdigest(),
         "sheet": sheet, "mapping": mapping, "status": "running", "error": None,
         "timeout_seconds": timeout,
-        "preview_response_seconds": None, "fill_complete_seconds": None,
+        "preview_request_seconds": None, "preview_response_seconds": None,
+        "fill_complete_seconds": None,
         "fill_request_seconds": None, "download_complete_seconds": None,
         "download_request_seconds": None, "fill": None, "download": None,
     }
@@ -200,17 +325,29 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
                            "detail": f"上传模板计时超过 {timeout} 秒，停止于{stage}阶段"}
         return record
 
+    def disconnected(stage: str, error: httpx.RequestError) -> dict:
+        record["status"] = "failed"
+        record["error"] = {"code": "transport_error", "stage": stage, "sheet": sheet,
+                           "elapsed_seconds": round(clock() - start, 4),
+                           "detail": f"HTTP 连接中断：{error}"}
+        return record
+
     def remaining() -> float:
-        return timeout - (clock() - start)
+        return deadline - clock()
 
     if remaining() <= 0:
         return timed_out("inspect")
     try:
-        preview = client.post("/templates/xlsx/inspect", files=files, timeout=remaining())
-    except httpx.TimeoutException:
-        record["preview_response_seconds"] = round(clock() - start, 4)
+        preview = before_deadline(
+            lambda budget: client.post("/templates/xlsx/inspect", files=files, timeout=budget),
+            deadline, clock)
+    except (DeadlineExceeded, httpx.TimeoutException):
+        record["preview_request_seconds"] = round(clock() - start, 4)
         return timed_out("inspect")
-    record["preview_response_seconds"] = round(clock() - start, 4)
+    except httpx.RequestError as error:
+        record["preview_request_seconds"] = round(clock() - start, 4)
+        return disconnected("inspect", error)
+    record["preview_request_seconds"] = record["preview_response_seconds"] = round(clock() - start, 4)
     if remaining() <= 0:
         return timed_out("inspect")
     if preview.status_code != 200:
@@ -237,20 +374,23 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
         return timed_out("fill")
     fill_start = clock()
     try:
-        filled = client.post("/templates/xlsx/fill", files=files, data={
-            "plan_id": plan["plan_id"], "sheet": sheet,
-            "mapping": json.dumps(mapping, ensure_ascii=False),
-        }, timeout=remaining())
-    except httpx.TimeoutException:
+        filled = before_deadline(
+            lambda budget: client.post("/templates/xlsx/fill", files=files, data={
+                "plan_id": plan["plan_id"], "sheet": sheet,
+                "mapping": json.dumps(mapping, ensure_ascii=False),
+            }, timeout=budget), deadline, clock)
+    except (DeadlineExceeded, httpx.TimeoutException):
         record["fill_request_seconds"] = round(clock() - fill_start, 4)
-        record["fill_complete_seconds"] = round(clock() - start, 4)
         return timed_out("fill")
+    except httpx.RequestError as error:
+        record["fill_request_seconds"] = round(clock() - fill_start, 4)
+        return disconnected("fill", error)
     record["fill_request_seconds"] = round(clock() - fill_start, 4)
-    record["fill_complete_seconds"] = round(clock() - start, 4)
     if remaining() <= 0:
         return timed_out("fill")
     if filled.status_code != 200:
         return failure("fill", filled)
+    record["fill_complete_seconds"] = round(clock() - start, 4)
     result = filled.json()
     record["fill"] = {key: result[key] for key in ("result_id", "rows", "cells_written", "cells_empty")}
     if remaining() <= 0:
@@ -259,41 +399,26 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
 
     def download_timing() -> None:
         record["download_request_seconds"] = round(clock() - download_start, 4)
-        record["download_complete_seconds"] = round(clock() - start, 4)
 
     try:
-        address = f"/operations/files/{result['result_id']}"
-        if callable(getattr(client, "stream", None)):
-            # A read timeout limits silence between chunks, not the total transfer.
-            with client.stream("GET", address, timeout=remaining()) as downloaded:
-                if downloaded.status_code != 200:
-                    downloaded.read()
-                    download_timing()
-                    return timed_out("download") if remaining() <= 0 else failure("download", downloaded)
-                chunks = []
-                for chunk in downloaded.iter_bytes():
-                    if remaining() <= 0:
-                        download_timing()
-                        return timed_out("download")
-                    chunks.append(chunk)
-                content = b"".join(chunks)
-        else:
-            # In-process model substitutes may only implement get().
-            downloaded = client.get(address, timeout=remaining())
-            if downloaded.status_code != 200:
-                download_timing()
-                return timed_out("download") if remaining() <= 0 else failure("download", downloaded)
-            content = downloaded.content
-    except httpx.TimeoutException:
+        status, payload = download_before_deadline(
+            client, f"/operations/files/{result['result_id']}", deadline, clock)
+    except (DeadlineExceeded, httpx.TimeoutException):
         download_timing()
         return timed_out("download")
+    except httpx.RequestError as error:
+        download_timing()
+        return disconnected("download", error)
     download_timing()
     if remaining() <= 0:
         return timed_out("download")
-    record["download"] = {"bytes": len(content), "sha256": sha256(content).hexdigest()}
+    if status != 200:
+        return failure("download", payload)
+    record["download_complete_seconds"] = round(clock() - start, 4)
+    record["download"] = {"bytes": len(payload), "sha256": sha256(payload).hexdigest()}
     if download_to is not None:
         download_to.parent.mkdir(parents=True, exist_ok=True)
-        download_to.write_bytes(content)
+        download_to.write_bytes(payload)
         record["download"]["path"] = str(download_to)
     record["status"] = "succeeded"
     return record

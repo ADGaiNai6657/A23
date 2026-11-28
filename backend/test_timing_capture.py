@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 from contextlib import contextmanager
 from hashlib import sha256
 from io import BytesIO
@@ -232,6 +233,7 @@ def test_fixed_cli_records_fill_download_and_poll_failures(tmp_path, monkeypatch
 
     class LocalClient:
         fail_download = False
+        slow_poll = False
 
         def __init__(self, **kwargs):
             pass
@@ -248,15 +250,18 @@ def test_fixed_cli_records_fill_download_and_poll_failures(tmp_path, monkeypatch
         def get(self, path, **kwargs):
             if self.fail_download and path == "/files":
                 return httpx.Response(404, json={"detail": "受控下载失败"})
+            if self.slow_poll and path.startswith("/tasks/"):
+                time.sleep(0.05)
             return inner.get(path, **kwargs)
 
     monkeypatch.setattr(timing_capture.httpx, "Client", LocalClient)
     for label, template, timeout, expected_status, expected_stage, expected_exit in (
         ("fill", "不存在.xlsx", "10", "failed", "fill", 1),
         ("download", CITY_TEMPLATE, "10", "failed", "download", 1),
-        ("poll", CITY_TEMPLATE, "0.000001", "timed_out", "poll", 2),
+        ("poll", CITY_TEMPLATE, "0.02", "timed_out", "poll", 2),
     ):
         LocalClient.fail_download = label == "download"
+        LocalClient.slow_poll = label == "poll"
         record_path = tmp_path / f"{label}.json"
         monkeypatch.setattr(sys, "argv", ["timing_capture.py", str(source), "--metrics", "GDP",
                                          "--template-name", template, "--output-name", CITY_OUTPUT,
@@ -272,8 +277,47 @@ def test_fixed_cli_records_fill_download_and_poll_failures(tmp_path, monkeypatch
             assert record["error"]["http_status"] == 404
             assert record["download_request_seconds"] is not None and record["download"] is None
         else:
-            assert record["terminal_observed_seconds"] is not None and record["download"] is None
+            assert record["poll_elapsed_seconds"] is not None
+            assert record["terminal_observed_seconds"] is None and record["download"] is None
     assert capsys.readouterr().out
+
+
+def test_transport_disconnect_is_located_in_all_timing_stages(tmp_path, monkeypatch):
+    inputs, _, _ = city_timing_inputs(tmp_path, monkeypatch)
+    source = (inputs / CITY_DOC).read_bytes()
+    inner = TestClient(main.app)
+
+    class BrokenClient:
+        def __init__(self, broken_path):
+            self.broken_path = broken_path
+
+        def post(self, path, **kwargs):
+            if path == self.broken_path:
+                raise httpx.RemoteProtocolError("受控断连")
+            return inner.post(path, **kwargs)
+
+        def get(self, path, **kwargs):
+            if path.startswith(self.broken_path):
+                raise httpx.RemoteProtocolError("受控断连")
+            return inner.get(path, **kwargs)
+
+    for stage, path in (("submit", "/tasks"), ("poll", "/tasks/"),
+                        ("fill", "/fill"), ("download", "/files")):
+        record = capture(BrokenClient(path), source, CITY_DOC, metrics="GDP",
+                         template_name=CITY_TEMPLATE, output_name=CITY_OUTPUT,
+                         poll_interval=0.01)
+        assert record["status"] == "failed" and record["error"]["code"] == "transport_error"
+        assert record["error"]["stage"] == stage and record["error"]["elapsed_seconds"] >= 0
+        assert bool(record["task_id"]) == (stage != "submit")
+        assert record["download"] is None
+
+    for stage, path in (("inspect", "/templates/xlsx/inspect"),
+                        ("fill", "/templates/xlsx/fill"),
+                        ("download", "/operations/files/")):
+        record = capture_uploaded_xlsx(BrokenClient(path), synthetic_source(), "源.xlsx",
+                                       seven_column_template(), "目标.xlsx", "目标", XLSX_MAPPING)
+        assert record["status"] == "failed" and record["error"]["code"] == "transport_error"
+        assert record["error"]["stage"] == stage and record["download"] is None
 
 
 def test_fixed_timing_rejects_replaced_download_even_with_identical_cells(tmp_path, monkeypatch):
@@ -391,21 +435,21 @@ def test_uploaded_template_timeout_covers_each_stage(tmp_path):
         class SlowClient:
             def post(self, path, **kwargs):
                 if path == slow_path:
-                    clock.value += 0.02
+                    clock.value += 2.0
                 return inner.post(path, **kwargs)
 
             def get(self, path, **kwargs):
                 if path.startswith(slow_path):
-                    clock.value += 0.02
+                    clock.value += 2.0
                 return inner.get(path, **kwargs)
 
         destination = tmp_path / f"{stage}.xlsx"
         record = capture_uploaded_xlsx(SlowClient(), source, "源.xlsx", template, "目标.xlsx",
                                        "目标", XLSX_MAPPING, download_to=destination,
-                                       timeout=0.01, clock=clock)
+                                       timeout=1, clock=clock)
         assert record["status"] == "timed_out" and record["error"]["stage"] == stage
         assert record["error"]["code"] == "timeout"
-        assert record["error"]["elapsed_seconds"] == 0.02
+        assert record["error"]["elapsed_seconds"] == 2.0
         assert record["download"] is None and not destination.exists()
 
 

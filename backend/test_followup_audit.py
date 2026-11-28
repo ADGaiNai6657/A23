@@ -1,4 +1,6 @@
 import json
+from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 from shutil import copytree
 from zipfile import ZipFile
@@ -11,7 +13,7 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from acceptance import DELIVERABLES, checked_outputs, sample_rules
-from check_dataset import CITY_FOLDER, CITY_SOURCE, CITY_TEMPLATE as PUBLIC_CITY_TEMPLATE, check_dataset
+from check_dataset import CITY_FOLDER, CITY_SOURCE, CITY_TEMPLATE as PUBLIC_CITY_TEMPLATE, check_dataset, score_published_fill
 from config import ROOT
 from criteria import MODEL_FIELDS, load_expectations
 from demo import CITY_TEMPLATE, make_workbook
@@ -19,6 +21,7 @@ from evaluate import evaluate
 from extractor import extract_document
 from fill_spec import CITY_HEADERS, CITY_OUTPUT, COVID_OUTPUT, REPORT_FILES
 from filler import fill_workbook
+from parsers import parse_document
 from rebuild_evidence import RUN_EVIDENCE, check_execution, digest
 from store import Store
 from unpack_dataset import unpack_dataset
@@ -407,6 +410,55 @@ def corpus(tmp_path_factory):
     folder = tmp_path_factory.mktemp("audit-corpus")
     unpack_dataset(ROOT / "dataset" / "测试集.zip", folder)
     return folder
+
+
+@pytest.mark.parametrize("interleaving", ["same_name", "unrelated"])
+def test_public_web_score_labels_database_observation_after_fill(tmp_path, corpus, interleaving):
+    output = tmp_path / "run"
+    archive = DELIVERABLES / "source" / "city-original-historical.json"
+    check_dataset(corpus, output, False, archive)
+    store = Store(output / "a23.db")
+    before_hash = sha256(store.path.read_bytes()).hexdigest()
+    archived = checked_outputs(output, "source")
+    assert archived["01"]["database_sha256"] == before_hash
+    assert archived["01"]["database_sha256_stage"] == "offline_post_extraction_pre_fill"
+    assert "database_sha256_observed_at" in archived["01"]
+    trace = json.loads((output / "fill_report.json").read_text())
+    source_path = corpus / "包含模板文件" / CITY_FOLDER / CITY_SOURCE
+    if interleaving == "same_name":
+        newer = Document(source_path)
+        newer.add_paragraph("新版附注。")
+        stream = BytesIO()
+        newer.save(stream)
+        content, name = stream.getvalue(), CITY_SOURCE
+    else:
+        content, name = "无关文档。\n".encode(), "无关.txt"
+    store.save(parse_document(content, name), content)
+    current_hash = sha256(store.path.read_bytes()).hexdigest()
+    assert current_hash != before_hash
+
+    score_published_fill(corpus, output, store, CITY_OUTPUT, CITY_SOURCE)
+    score = json.loads((output / "source_report.json").read_text())
+    assert score["block_count"] == trace["block_count"] == 113
+    assert score["publication_id"] == trace["publication_id"]
+    assert score["source_sha256"] == trace["source_sha256"]
+    assert score["workbook_sha256"] == trace["workbook_sha256"]
+    assert score["cell_accuracy"] == 1 and score["rows"] == 100
+    if interleaving == "same_name":
+        assert len(store.blocks(CITY_SOURCE)) == 114
+        assert score["database_status"] == "changed_after_fill"
+        assert "database_sha256" not in score
+        assert "database_sha256_observed_at" not in score
+    else:
+        assert len(store.blocks(CITY_SOURCE)) == 113
+        assert score["database_sha256"] == current_hash
+        assert score["database_sha256_stage"] == "web_scoring_after_fill"
+        assert "database_sha256_observed_at" in score
+    book = load_workbook(output / CITY_OUTPUT, read_only=True, data_only=True)
+    try:
+        assert book.active["B2"].value == 56708.71
+    finally:
+        book.close()
 
 
 @pytest.mark.parametrize("damage", ["none", "missing-batch", "duplicate-batch", "no-receipt", "wrong-document"])
