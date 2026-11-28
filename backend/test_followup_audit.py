@@ -1,4 +1,5 @@
 import json
+import os
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -13,7 +14,9 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from acceptance import DELIVERABLES, checked_outputs, sample_rules
-from check_dataset import CITY_FOLDER, CITY_SOURCE, CITY_TEMPLATE as PUBLIC_CITY_TEMPLATE, check_dataset, score_published_fill
+import check_dataset as source_check
+from check_dataset import (CITY_FOLDER, CITY_SOURCE, CITY_TEMPLATE as PUBLIC_CITY_TEMPLATE,
+                           DAILY_FOLDER, DAILY_SOURCE, DAILY_TEMPLATE, check_dataset, score_published_fill)
 from config import ROOT
 from criteria import MODEL_FIELDS, load_expectations
 from demo import CITY_TEMPLATE, make_workbook
@@ -459,6 +462,68 @@ def test_public_web_score_labels_database_observation_after_fill(tmp_path, corpu
         assert book.active["B2"].value == 56708.71
     finally:
         book.close()
+
+
+def test_public_score_uses_checked_source_bytes_after_file_replacement(tmp_path, corpus, monkeypatch):
+    output = tmp_path / "run"
+    check_dataset(corpus, output, False, DELIVERABLES / "source" / "city-original-historical.json")
+    monkeypatch.setattr(main, "DATA", output)
+    client = TestClient(main.app)
+    store = Store(output / "a23.db")
+    original_hash = sha256(store.path.read_bytes()).hexdigest()
+    assert checked_outputs(output, "source")["01"]["database_sha256"] == original_hash
+
+    for label, folder, name, template, result, helper in (
+        ("01", CITY_FOLDER, CITY_SOURCE, PUBLIC_CITY_TEMPLATE, CITY_OUTPUT, "city_expected"),
+        ("03", DAILY_FOLDER, DAILY_SOURCE, DAILY_TEMPLATE, COVID_OUTPUT, "daily_expected"),
+    ):
+        source_dir = tmp_path / label / "包含模板文件" / folder
+        source_dir.mkdir(parents=True)
+        source_path = source_dir / name
+        source_path.write_bytes((corpus / "包含模板文件" / folder / name).read_bytes())
+        (source_dir / template).write_bytes((corpus / "包含模板文件" / folder / template).read_bytes())
+        locked = source_path.read_bytes()
+        original_helper = getattr(source_check, helper)
+
+        def swap_after_check(content, *, original=original_helper, path=source_path, case=label):
+            assert isinstance(content, bytes) and content == locked
+            if case == "01":
+                document = Document(BytesIO(content))
+                paragraph = next(p for p in document.paragraphs if "56,708.71" in p.text)
+                paragraph.text = paragraph.text.replace("56,708.71", "56,709.71", 1)
+                staged = path.with_suffix(".new.docx")
+                document.save(staged)
+            else:
+                workbook = load_workbook(BytesIO(content))
+                _, locators = original(content)
+                headers = [cell.value for cell in workbook.active[1]]
+                workbook.active.cell(locators[0]["row"], headers.index("人口") + 1, 999999999)
+                staged = path.with_suffix(".new.xlsx")
+                workbook.save(staged)
+                workbook.close()
+            os.replace(staged, path)
+            return original(content)
+
+        monkeypatch.setattr(source_check, helper, swap_after_check)
+        try:
+            score_published_fill(tmp_path / label, output, store, result, name)
+        finally:
+            monkeypatch.setattr(source_check, helper, original_helper)
+        trace_name, _, score_name = REPORT_FILES[result]
+        trace = json.loads((output / trace_name).read_text())
+        score = json.loads((output / score_name).read_text())
+        assert sha256(source_path.read_bytes()).hexdigest() != sha256(locked).hexdigest()
+        assert score["source_sha256"] == trace["source_sha256"] == sha256(locked).hexdigest()
+        assert score["result_id"] == trace["result_id"]
+        assert score["publication_id"] == trace["publication_id"]
+        assert score["database_sha256_stage"] == "web_scoring_after_fill"
+        assert score["database_sha256"] == original_hash
+        assert score["wrong_values"] == score["missed"] == 0
+        assert score["cells_written"] == (500 if label == "01" else 17464)
+        published = client.get("/reports", params={"doc": name, "file": result,
+                                                    "result_id": trace["result_id"]})
+        assert published.status_code == 200 and published.json() == score
+    assert checked_outputs(output, "source")["03"]["database_sha256"] == original_hash
 
 
 @pytest.mark.parametrize("damage", ["none", "missing-batch", "duplicate-batch", "no-receipt", "wrong-document"])

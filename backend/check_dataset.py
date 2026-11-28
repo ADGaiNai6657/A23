@@ -4,6 +4,7 @@ import json
 import re
 from collections import Counter
 from datetime import date, datetime, timezone
+from io import BytesIO
 from itertools import zip_longest
 from pathlib import Path
 from time import perf_counter
@@ -46,9 +47,10 @@ CORPUS_ANCHORS = {
 }
 
 
-def city_expected(path: Path) -> tuple[list[tuple], list[dict]]:
+def city_expected(source: Path | bytes) -> tuple[list[tuple], list[dict]]:
+    content = source.read_bytes() if isinstance(source, Path) else source
     paragraphs = [
-        (number, paragraph.text) for number, paragraph in enumerate(Document(path).paragraphs, 1)
+        (number, paragraph.text) for number, paragraph in enumerate(Document(BytesIO(content)).paragraphs, 1)
         if "一般公共预算收入" in paragraph.text
     ]
     expected = []
@@ -70,8 +72,9 @@ def city_expected(path: Path) -> tuple[list[tuple], list[dict]]:
     return expected, locators
 
 
-def daily_expected(path: Path) -> tuple[list[tuple], list[dict]]:
-    workbook = load_workbook(path, read_only=True, data_only=True)
+def daily_expected(source: Path | bytes) -> tuple[list[tuple], list[dict]]:
+    content = source.read_bytes() if isinstance(source, Path) else source
+    workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
     try:
         rows = workbook.active.values
         headers = next(rows)
@@ -204,11 +207,12 @@ def score_published_fill(root: Path, directory: Path, store: Store, file: str, d
     source_path = root / "包含模板文件" / folder / source
     trace_name, _, report_name = REPORT_FILES[file]
     trace = json.loads((directory / trace_name).read_text(encoding="utf-8"))
-    if trace["source_sha256"] != hashlib.sha256(source_path.read_bytes()).hexdigest() or (
+    source_content = source_path.read_bytes()
+    if trace["source_sha256"] != hashlib.sha256(source_content).hexdigest() or (
         trace["template_sha256"] != hashlib.sha256(source_path.with_name(template).read_bytes()).hexdigest()
     ):
         return
-    expected, _ = daily_expected(source_path) if daily else city_expected(source_path)
+    expected, _ = daily_expected(source_content) if daily else city_expected(source_content)
     audit = verify_workbook(directory / file, expected, 7 if daily else 5)
     database_sha256 = hashlib.sha256(store.path.read_bytes()).hexdigest()
     database_observed_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -305,8 +309,13 @@ def check_dataset(root: Path, output: Path, extract: bool, archived_facts: Path 
     originals = {
         path: hashlib.sha256(path.read_bytes()).hexdigest() for path in (city_template, daily_template)
     }
-    expected_city, city_locators = city_expected(city_source)
-    expected_daily, daily_locators = daily_expected(daily_source)
+    # The filled workbook reads these stored document versions. Audit the same bytes.
+    city_snapshot = store.snapshot(CITY_SOURCE, with_facts=False)
+    daily_snapshot = store.snapshot(DAILY_SOURCE, with_facts=False)
+    if city_snapshot is None or daily_snapshot is None:
+        raise ValueError("公开原文尚未入库，无法锁定核对版本")
+    expected_city, city_locators = city_expected(city_snapshot[0])
+    expected_daily, daily_locators = daily_expected(daily_snapshot[0])
     expected_rules = checked_rules(load_expectations(), "same-db")
     city_rules, daily_rules = expected_rules["01"], expected_rules["03"]
     if len(expected_city) != city_rules["rows"] or len(expected_daily) != daily_rules["rows"]:

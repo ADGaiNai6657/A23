@@ -2,18 +2,54 @@
 
 import argparse
 import json
+from io import BytesIO
 from queue import Empty, Queue
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from time import monotonic, sleep
 
 import httpx
+from openpyxl import load_workbook
 
 
 class DeadlineExceeded(TimeoutError):
     """The workflow's monotonic deadline elapsed while waiting for I/O."""
+
+
+def response_detail(response) -> object:
+    """Keep error bodies readable even when a service sends an array or HTML."""
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text
+    return body.get("detail", body) if isinstance(body, dict) else body
+
+
+def object_response(response, *fields: str) -> tuple[dict | None, str | None]:
+    """Validate the shape before a timing workflow reads protocol fields."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None, "响应不是 JSON 对象"
+    if not isinstance(body, dict):
+        return None, "响应不是 JSON 对象"
+    missing = [field for field in fields if field not in body]
+    if missing:
+        return None, f"响应缺少字段：{', '.join(missing)}"
+    return body, None
+
+
+def valid_xlsx(content: bytes) -> bool:
+    """Require an openable workbook before recording a download as successful."""
+    try:
+        book = load_workbook(BytesIO(content), read_only=True, data_only=False)
+        book.close()
+        return True
+    except Exception:
+        # openpyxl may raise several ZIP/XML errors for a corrupt workbook.
+        return False
 
 
 def before_deadline(action, deadline: float, clock=monotonic):
@@ -41,47 +77,64 @@ def before_deadline(action, deadline: float, clock=monotonic):
     return result
 
 
-def download_before_deadline(client, address: str, deadline: float, clock=monotonic,
-                             params: dict | None = None) -> tuple[int, object]:
-    """Read a response one chunk at a time, interrupting a wait that crosses the deadline."""
-    if not callable(getattr(client, "stream", None)):
-        response = before_deadline(lambda remaining: client.get(address, params=params, timeout=remaining),
-                                   deadline, clock)
-        return response.status_code, response.content if response.status_code == 200 else response
+def request_before_deadline(client, method: str, address: str, deadline: float,
+                            clock=monotonic, **kwargs):
+    """Read a whole HTTP response with cancellation between streamed chunks."""
+    if not callable(getattr(client, "stream", None)) or (
+        method != "GET" and not isinstance(client, httpx.Client)
+    ):
+        call = client.get if method == "GET" else client.post
+        return before_deadline(lambda remaining: call(address, timeout=remaining, **kwargs), deadline, clock)
 
     events, acknowledgements = Queue(), Queue(maxsize=1)
+    cancelled = Event()
     active = {}
 
     def run():
         try:
-            with client.stream("GET", address, params=params,
-                               timeout=max(deadline - clock(), 0.001)) as response:
+            with client.stream(method, address, timeout=max(deadline - clock(), 0.001),
+                               **kwargs) as response:
                 active["response"] = response
-                if response.status_code != 200:
-                    response.read()
-                    events.put(("failure", response))
-                    return
-                events.put(("success", None))
-                for chunk in response.iter_bytes():
+                events.put(("headers", (response.status_code, dict(getattr(response, "headers", {})))))
+                stream = iter(response.iter_bytes())
+                while not cancelled.is_set():
+                    try:
+                        chunk = next(stream)
+                    except StopIteration:
+                        break
                     events.put(("chunk", chunk))
-                    if not acknowledgements.get():
+                    while not cancelled.is_set():
+                        try:
+                            acknowledgements.get(timeout=0.01)
+                            break
+                        except Empty:
+                            continue
+                    if cancelled.is_set():
                         return
-                events.put(("done", None))
+                if not cancelled.is_set():
+                    events.put(("done", None))
         except Exception as error:
-            events.put(("error", error))
+            if not cancelled.is_set():
+                events.put(("error", error))
 
     def abort():
-        acknowledgements.put_nowait(False)
+        cancelled.set()
         response = active.get("response")
         close = getattr(response, "close", None)
         if callable(close):
-            try:
-                close()
-            except httpx.StreamError:
-                pass
+            # Closing a socket can block; do not extend the caller's deadline.
+            def close_safely():
+                try:
+                    close()
+                except Exception:
+                    pass
+
+            Thread(target=close_safely, daemon=True).start()
 
     Thread(target=run, daemon=True).start()
     chunks = []
+    status = None
+    headers = {}
     while True:
         remaining = deadline - clock()
         if remaining <= 0:
@@ -97,13 +150,20 @@ def download_before_deadline(client, address: str, deadline: float, clock=monoto
             raise DeadlineExceeded
         if kind == "error":
             raise value
-        if kind == "failure":
-            return value.status_code, value
+        if kind == "headers":
+            status, headers = value
         if kind == "chunk":
             chunks.append(value)
-            acknowledgements.put(True)
+            acknowledgements.put_nowait(True)
         if kind == "done":
-            return 200, b"".join(chunks)
+            return httpx.Response(status, headers=headers, content=b"".join(chunks))
+
+
+def download_before_deadline(client, address: str, deadline: float, clock=monotonic,
+                             params: dict | None = None) -> tuple[int, object]:
+    """Read a download under the same deadline and retain failed HTTP details."""
+    response = request_before_deadline(client, "GET", address, deadline, clock, params=params)
+    return response.status_code, response.content if response.status_code == 200 else response
 
 
 def seconds_between(start: str | None, end: str | None) -> float | None:
@@ -140,13 +200,16 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
     }
 
     def failure(stage: str, response) -> dict:
-        try:
-            detail = response.json().get("detail", response.text)
-        except ValueError:
-            detail = response.text
         record["status"] = "failed"
         record["error"] = {"code": "http_error", "stage": stage,
-                           "http_status": response.status_code, "detail": detail}
+                           "http_status": response.status_code, "detail": response_detail(response),
+                           "elapsed_seconds": round(clock() - start, 4)}
+        return record
+
+    def invalid(stage: str, detail: str) -> dict:
+        record["status"] = "failed"
+        record["error"] = {"code": "invalid_response", "stage": stage, "detail": detail,
+                           "elapsed_seconds": round(clock() - start, 4)}
         return record
 
     def timed_out(stage: str) -> dict:
@@ -164,9 +227,9 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
         return record
 
     try:
-        response = before_deadline(
-            lambda remaining: client.post("/tasks", files={"file": (source_name, source)},
-                                          data={"metrics": metrics}, timeout=remaining), deadline, clock)
+        response = request_before_deadline(client, "POST", "/tasks", deadline, clock,
+                                           files={"file": (source_name, source)},
+                                           data={"metrics": metrics})
     except (DeadlineExceeded, httpx.TimeoutException):
         record["submit_request_seconds"] = round(clock() - start, 4)
         return timed_out("submit")
@@ -176,7 +239,10 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
     record["submit_request_seconds"] = record["first_response_seconds"] = round(clock() - start, 4)
     if response.status_code != 202:
         return failure("submit", response)
-    task_id = response.json()["task_id"]
+    submitted, problem = object_response(response, "task_id")
+    if problem or not isinstance(submitted["task_id"], str) or not submitted["task_id"].strip():
+        return invalid("submit", problem or "任务 ID 必须是非空字符串")
+    task_id = submitted["task_id"]
     record["task_id"] = task_id
     while True:
         remaining = deadline - clock()
@@ -184,8 +250,8 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
             record["poll_elapsed_seconds"] = round(clock() - start, 4)
             return timed_out("poll")
         try:
-            status_response = before_deadline(
-                lambda budget: client.get(f"/tasks/{task_id}", timeout=budget), deadline, clock)
+            status_response = request_before_deadline(client, "GET", f"/tasks/{task_id}",
+                                                      deadline, clock)
         except (DeadlineExceeded, httpx.TimeoutException):
             record["poll_elapsed_seconds"] = round(clock() - start, 4)
             return timed_out("poll")
@@ -195,8 +261,30 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
         record["poll_elapsed_seconds"] = round(clock() - start, 4)
         if status_response.status_code != 200:
             return failure("poll", status_response)
-        task = status_response.json()
+        task, problem = object_response(status_response, "status")
+        if (problem or not isinstance(task["status"], str)
+            or task["status"] not in {"queued", "running", "succeeded", "superseded", "failed"}):
+            return invalid("poll", problem or "任务状态字段无效")
         if task["status"] in {"succeeded", "superseded", "failed"}:
+            required = ("publication_id", "source_sha256", "current_source_sha256", "is_current",
+                        "submitted_at", "started_at", "finished_at", "error")
+            task, problem = object_response(status_response, *required)
+            if problem:
+                return invalid("poll", problem)
+            if (not isinstance(task["source_sha256"], str)
+                or not isinstance(task["is_current"], bool)
+                or (task["current_source_sha256"] is not None
+                    and not isinstance(task["current_source_sha256"], str))
+                or (task["publication_id"] is not None and type(task["publication_id"]) is not int)
+                or (task["error"] is not None and not isinstance(task["error"], dict))
+                or any(value is not None and not isinstance(value, str)
+                       for value in (task["submitted_at"], task["started_at"], task["finished_at"]))):
+                return invalid("poll", "任务版本或时间字段类型无效")
+            try:
+                seconds_between(task["submitted_at"], task["started_at"])
+                seconds_between(task["started_at"], task["finished_at"])
+            except ValueError:
+                return invalid("poll", "任务时间字段格式无效")
             record["terminal_observed_seconds"] = record["poll_elapsed_seconds"]
             break
         pause(min(poll_interval, max(0, deadline - clock())))
@@ -230,12 +318,12 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
     if template_name and task["status"] == "succeeded":
         fill_start = clock()
         try:
-            filled = before_deadline(
-                lambda remaining: client.post("/fill", json={
+            filled = request_before_deadline(client, "POST", "/fill", deadline, clock,
+                json={
                     "doc": source_name, "template": template_name,
                     "source_sha256": record["source_sha256"],
                     "expected_publication_id": record["publication_id"],
-                }, timeout=remaining), deadline, clock)
+                })
         except (DeadlineExceeded, httpx.TimeoutException):
             record["fill_request_seconds"] = round(clock() - fill_start, 4)
             return timed_out("fill")
@@ -246,17 +334,25 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
         record["fill_response_seconds"] = round(clock() - start, 4)
         if filled.status_code == 409:
             record["status"] = "version_conflict"
-            record["error"] = {"code": "version_conflict", "message": filled.json().get("detail", "事实版本冲突")}
+            record["error"] = {"code": "version_conflict", "stage": "fill",
+                               "message": response_detail(filled)}
             return record
         if filled.status_code != 200:
             return failure("fill", filled)
-        record["fill_publication_id"] = int(filled.headers["X-A23-Publication-ID"])
+        fill_body, problem = object_response(filled, "rows", "cells_written", "cells_empty")
+        if (problem or any(type(fill_body[field]) is not int or fill_body[field] < 0
+                           for field in ("rows", "cells_written", "cells_empty"))):
+            return invalid("fill", problem or "填写响应的数量字段无效")
+        publication = filled.headers.get("X-A23-Publication-ID")
+        result_id = filled.headers.get("X-A23-Result-ID")
+        if not publication or not publication.isdecimal() or not result_id or not result_id.strip():
+            return invalid("fill", "填写响应缺少有效发布号或结果版本头")
+        record["fill_publication_id"] = int(publication)
         if record["fill_publication_id"] != record["publication_id"]:
             record["status"] = "version_conflict"
             record["error"] = {"code": "version_conflict", "stage": "fill",
                                "message": "填写结果与识别任务的事实批次不一致"}
             return record
-        result_id = filled.headers["X-A23-Result-ID"]
         download_start = clock()
         try:
             status, payload = download_before_deadline(
@@ -271,11 +367,13 @@ def capture(client, source: bytes, source_name: str, *, metrics: str = "",
         record["download_request_seconds"] = round(clock() - download_start, 4)
         if status == 409:
             record["status"] = "version_conflict"
-            record["error"] = {"code": "version_conflict",
-                               "message": payload.json().get("detail", "填写结果版本冲突")}
+            record["error"] = {"code": "version_conflict", "stage": "download",
+                               "message": response_detail(payload)}
             return record
         if status != 200:
             return failure("download", payload)
+        if not valid_xlsx(payload):
+            return invalid("download", "下载内容不是有效 XLSX 工作簿")
         record["download_complete_seconds"] = round(clock() - start, 4)
         record["download"] = {"name": output_name, "result_id": result_id,
                               "publication_id": record["fill_publication_id"],
@@ -308,13 +406,16 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
     }
 
     def failure(stage: str, response) -> dict:
-        try:
-            detail = response.json().get("detail", response.text)
-        except ValueError:
-            detail = response.text
         record["status"] = "failed"
         record["error"] = {"stage": stage, "sheet": sheet,
-                           "http_status": response.status_code, "detail": detail}
+                           "http_status": response.status_code, "detail": response_detail(response),
+                           "elapsed_seconds": round(clock() - start, 4)}
+        return record
+
+    def invalid(stage: str, detail: str) -> dict:
+        record["status"] = "failed"
+        record["error"] = {"code": "invalid_response", "stage": stage, "sheet": sheet,
+                           "detail": detail, "elapsed_seconds": round(clock() - start, 4)}
         return record
 
     def timed_out(stage: str) -> dict:
@@ -338,9 +439,8 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
     if remaining() <= 0:
         return timed_out("inspect")
     try:
-        preview = before_deadline(
-            lambda budget: client.post("/templates/xlsx/inspect", files=files, timeout=budget),
-            deadline, clock)
+        preview = request_before_deadline(client, "POST", "/templates/xlsx/inspect",
+                                          deadline, clock, files=files)
     except (DeadlineExceeded, httpx.TimeoutException):
         record["preview_request_seconds"] = round(clock() - start, 4)
         return timed_out("inspect")
@@ -352,7 +452,12 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
         return timed_out("inspect")
     if preview.status_code != 200:
         return failure("inspect", preview)
-    plan = preview.json()
+    plan, problem = object_response(preview, "plan_id", "target_sheets")
+    if (problem or not isinstance(plan["plan_id"], str) or not plan["plan_id"].strip()
+        or not isinstance(plan["target_sheets"], list)
+        or any(not isinstance(item, dict) or not isinstance(item.get("name"), str)
+               for item in plan["target_sheets"])):
+        return invalid("inspect", problem or "预览计划或工作表列表无效")
     target = next((item for item in plan["target_sheets"] if item["name"] == sheet), None)
     if target is None:
         record["status"] = "failed"
@@ -364,7 +469,12 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
         record["error"] = {"code": "blocked_sheet", "stage": "selection", "sheet": sheet,
                            "detail": target["blocked_reason"]}
         return record
-    columns = {item["column"] for item in target["headers"]}
+    headers = target.get("headers")
+    if not isinstance(headers, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("column"), str) for item in headers
+    ):
+        return invalid("inspect", f"工作表「{sheet}」的表头结构无效")
+    columns = {item["column"] for item in headers}
     if set(mapping) != columns:
         record["status"] = "failed"
         record["error"] = {"code": "mapping_mismatch", "stage": "selection", "sheet": sheet,
@@ -374,11 +484,11 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
         return timed_out("fill")
     fill_start = clock()
     try:
-        filled = before_deadline(
-            lambda budget: client.post("/templates/xlsx/fill", files=files, data={
+        filled = request_before_deadline(client, "POST", "/templates/xlsx/fill",
+            deadline, clock, files=files, data={
                 "plan_id": plan["plan_id"], "sheet": sheet,
                 "mapping": json.dumps(mapping, ensure_ascii=False),
-            }, timeout=budget), deadline, clock)
+            })
     except (DeadlineExceeded, httpx.TimeoutException):
         record["fill_request_seconds"] = round(clock() - fill_start, 4)
         return timed_out("fill")
@@ -391,7 +501,11 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
     if filled.status_code != 200:
         return failure("fill", filled)
     record["fill_complete_seconds"] = round(clock() - start, 4)
-    result = filled.json()
+    result, problem = object_response(filled, "result_id", "rows", "cells_written", "cells_empty")
+    if (problem or not isinstance(result["result_id"], str) or not result["result_id"].strip()
+        or any(type(result[field]) is not int or result[field] < 0
+               for field in ("rows", "cells_written", "cells_empty"))):
+        return invalid("fill", problem or "填写响应的结果版本或数量字段无效")
     record["fill"] = {key: result[key] for key in ("result_id", "rows", "cells_written", "cells_empty")}
     if remaining() <= 0:
         return timed_out("download")
@@ -414,6 +528,8 @@ def capture_uploaded_xlsx(client, source: bytes, source_name: str, template: byt
         return timed_out("download")
     if status != 200:
         return failure("download", payload)
+    if not valid_xlsx(payload):
+        return invalid("download", "下载内容不是有效 XLSX 工作簿")
     record["download_complete_seconds"] = round(clock() - start, 4)
     record["download"] = {"bytes": len(payload), "sha256": sha256(payload).hexdigest()}
     if download_to is not None:

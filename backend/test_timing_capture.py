@@ -6,8 +6,11 @@ import time
 from contextlib import contextmanager
 from hashlib import sha256
 from io import BytesIO
+from queue import Empty, Queue
+from threading import Event
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from docx import Document
 from openpyxl import load_workbook
@@ -25,6 +28,164 @@ from timing_capture import capture, capture_uploaded_xlsx, seconds_between
 
 XLSX_MAPPING = {"A": "date", "B": "country", "C": "continent", "D": "gdp_per_capita",
                 "E": "population", "F": "每日检测数", "G": "病例数"}
+
+
+def test_stream_cancel_when_ack_queue_is_full(monkeypatch):
+    """The deadline can arrive after enqueueing True but before the reader consumes it."""
+    class Clock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = Clock()
+    release = Event()
+    queued = Event()
+    closed = Event()
+
+    class PausedAck(Queue):
+        def put_nowait(self, item):
+            super().put_nowait(item)
+            clock.value = 1.0
+            queued.set()
+
+        def get(self, *args, **kwargs):
+            if not release.wait(1):
+                raise Empty
+            return super().get(*args, **kwargs)
+
+    monkeypatch.setattr(timing_capture, "Queue", lambda maxsize=0: PausedAck(maxsize) if maxsize else Queue())
+
+    class Response:
+        status_code = 200
+        closed = False
+
+        def iter_bytes(self):
+            yield b"first"
+            yield b"should-not-read"
+
+        def close(self):
+            self.closed = True
+            closed.set()
+
+    response = Response()
+
+    class Client:
+        @contextmanager
+        def stream(self, *_args, **_kwargs):
+            yield response
+
+    try:
+        with pytest.raises(timing_capture.DeadlineExceeded):
+            timing_capture.request_before_deadline(Client(), "GET", "/files", 1, clock)
+        assert queued.is_set()
+        assert closed.wait(1) and response.closed
+    finally:
+        release.set()
+
+
+def test_malformed_timing_responses_keep_stage_and_no_download(tmp_path, monkeypatch):
+    inputs, outputs, _ = city_timing_inputs(tmp_path, monkeypatch)
+    source = (inputs / CITY_DOC).read_bytes()
+    inner = TestClient(main.app)
+
+    class ModifiedClient:
+        def __init__(self, path, response):
+            self.path, self.response = path, response
+
+        def post(self, path, **kwargs):
+            return self.response if path == self.path else inner.post(path, **kwargs)
+
+        def get(self, path, **kwargs):
+            return self.response if path.startswith(self.path) else inner.get(path, **kwargs)
+
+    for response, code in ((httpx.Response(503, json=["繁忙"]), "http_error"),
+                           (httpx.Response(202, json={}), "invalid_response")):
+        record = capture(ModifiedClient("/tasks", response), source, CITY_DOC)
+        assert record["status"] == "failed" and record["error"]["code"] == code
+        assert record["error"]["stage"] == "submit" and record["task_id"] is None
+        assert record["error"]["elapsed_seconds"] >= 0 and record["download"] is None
+
+    missing_version = httpx.Response(200, json={}, headers={"X-A23-Publication-ID": "1"})
+    record = capture(ModifiedClient("/fill", missing_version), source, CITY_DOC, metrics="GDP",
+                     template_name=CITY_TEMPLATE, output_name=CITY_OUTPUT, poll_interval=0.01)
+    assert record["status"] == "failed" and record["error"]["stage"] == "fill"
+    assert record["error"]["code"] == "invalid_response" and record["task_id"]
+    assert record["download"] is None and record["fill_request_seconds"] is not None
+
+    html = httpx.Response(200, text="<html>wrong file</html>", headers={"content-type": "text/html"})
+    malformed_fill = httpx.Response(200, text="<html>not JSON</html>", headers={
+        "X-A23-Publication-ID": "1", "X-A23-Result-ID": "result",
+    })
+    record = capture(ModifiedClient("/fill", malformed_fill), source, CITY_DOC, metrics="GDP",
+                     template_name=CITY_TEMPLATE, output_name=CITY_OUTPUT, poll_interval=0.01)
+    assert record["status"] == "failed" and record["error"]["stage"] == "fill"
+    assert record["error"]["code"] == "invalid_response" and record["task_id"]
+
+    record = capture(ModifiedClient("/tasks/", html), source, CITY_DOC, metrics="GDP",
+                     template_name=CITY_TEMPLATE, output_name=CITY_OUTPUT, poll_interval=0.01)
+    assert record["status"] == "failed" and record["error"]["stage"] == "poll"
+    assert record["error"]["code"] == "invalid_response" and record["task_id"]
+
+    record = capture(ModifiedClient("/files", html), source, CITY_DOC, metrics="GDP",
+                     template_name=CITY_TEMPLATE, output_name=CITY_OUTPUT, poll_interval=0.01)
+    assert record["status"] == "failed" and record["error"]["stage"] == "download"
+    assert record["error"]["code"] == "invalid_response" and record["task_id"]
+    assert record["download"] is None and not (outputs / "invalid.xlsx").exists()
+
+    destination = tmp_path / "html.xlsx"
+    record = capture_uploaded_xlsx(ModifiedClient("/templates/xlsx/inspect", html),
+                                   synthetic_source(), "源.xlsx", seven_column_template(),
+                                   "目标.xlsx", "目标", XLSX_MAPPING, download_to=destination)
+    assert record["status"] == "failed" and record["error"]["stage"] == "inspect"
+    assert record["error"]["code"] == "invalid_response" and not destination.exists()
+
+    record = capture_uploaded_xlsx(ModifiedClient("/templates/xlsx/fill", httpx.Response(200, json={"rows": 1})),
+                                   synthetic_source(), "源.xlsx", seven_column_template(),
+                                   "目标.xlsx", "目标", XLSX_MAPPING, download_to=destination)
+    assert record["status"] == "failed" and record["error"]["stage"] == "fill"
+    assert record["error"]["code"] == "invalid_response" and not destination.exists()
+
+    record = capture_uploaded_xlsx(ModifiedClient("/operations/files/", html), synthetic_source(),
+                                   "源.xlsx", seven_column_template(), "目标.xlsx", "目标", XLSX_MAPPING,
+                                   download_to=destination)
+    assert record["status"] == "failed" and record["error"]["stage"] == "download"
+    assert record["download"] is None and not destination.exists()
+
+
+def test_invalid_download_cli_writes_failed_json(tmp_path, monkeypatch):
+    inputs, _, _ = city_timing_inputs(tmp_path, monkeypatch)
+    inner = TestClient(main.app)
+    source = inputs / CITY_DOC
+    record_path = tmp_path / "invalid-download.json"
+
+    class LocalClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, path, **kwargs):
+            return inner.post(path, **kwargs)
+
+        def get(self, path, **kwargs):
+            if path == "/files":
+                return httpx.Response(200, text="<html>not an Excel file</html>")
+            return inner.get(path, **kwargs)
+
+    monkeypatch.setattr(timing_capture.httpx, "Client", LocalClient)
+    monkeypatch.setattr(sys, "argv", ["timing_capture.py", str(source), "--metrics", "GDP",
+                                     "--template-name", CITY_TEMPLATE, "--output-name", CITY_OUTPUT,
+                                     "--record", str(record_path)])
+    assert timing_capture.main() == 1
+    receipt = json.loads(record_path.read_text())
+    assert receipt["status"] == "failed" and receipt["error"]["stage"] == "download"
+    assert receipt["error"]["code"] == "invalid_response" and receipt["task_id"]
+    assert receipt["download"] is None and receipt["download_request_seconds"] is not None
 
 
 def test_timing_capture_covers_first_response_result_and_download(tmp_path, monkeypatch):
