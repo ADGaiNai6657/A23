@@ -261,7 +261,7 @@ def score_filled(doc: str) -> None:
             "03" if file == COVID_OUTPUT else "01"
         ]["rows"]
         evaluate(DATA / file, reference, DATA / REPORT_FILES[file][1], doc, file == COVID_OUTPUT,
-                 expected_rows=rows, block_count=len(store.blocks(doc)), database=store.path)
+                 expected_rows=rows)
     elif SOURCE_CHECK_ROOT:
         score_published_fill(SOURCE_CHECK_ROOT, DATA, store, file, doc)
 
@@ -291,7 +291,8 @@ def matching_score(file: str, trace: dict) -> dict | None:
             report = read_report(name)
             if report.get("file") == file and trace.get("run_id") and all(
                 report.get(key) == trace.get(key)
-                for key in ("doc", "result_id", "run_id", "workbook_sha256", "source_sha256", "template_sha256")
+                for key in ("doc", "result_id", "run_id", "workbook_sha256", "source_sha256",
+                            "template_sha256", "publication_id")
             ):
                 return report
     return None

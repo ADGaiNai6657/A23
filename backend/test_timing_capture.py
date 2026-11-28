@@ -2,11 +2,13 @@
 
 import json
 import sys
+from contextlib import contextmanager
 from hashlib import sha256
 from io import BytesIO
 
 import httpx
 from fastapi.testclient import TestClient
+from docx import Document
 from openpyxl import load_workbook
 
 import extractor
@@ -128,6 +130,150 @@ def test_fixed_timing_rejects_same_sha_newer_fact_batch(tmp_path, monkeypatch):
     assert record["fill_publication_id"] is None and record["download"] is None
     assert not (outputs / CITY_OUTPUT).exists()
     assert {fact["metric"] for fact in database.facts(CITY_DOC)} == {"常住人口"}
+
+
+def test_fixed_timing_superseded_before_first_poll_is_not_success(tmp_path, monkeypatch, capsys):
+    inputs, outputs, database = city_timing_inputs(tmp_path, monkeypatch)
+    source = (inputs / CITY_DOC).read_bytes()
+    inner = TestClient(main.app)
+
+    class InterleavingClient:
+        def __init__(self):
+            self.replaced = False
+
+        def post(self, path, **kwargs):
+            return inner.post(path, **kwargs)
+
+        def get(self, path, **kwargs):
+            if path.startswith("/tasks/") and not self.replaced:
+                from test_tasks import completed
+                assert completed(inner, path.rsplit("/", 1)[-1])["status"] == "succeeded"
+                newer = inner.post("/extract", files={"file": (CITY_DOC, source)},
+                                   data={"metrics": "人口"})
+                assert newer.status_code == 200
+                self.replaced = True
+            return inner.get(path, **kwargs)
+
+    record = capture(InterleavingClient(), source, CITY_DOC, metrics="GDP",
+                     template_name=CITY_TEMPLATE, output_name=CITY_OUTPUT, poll_interval=0.01)
+    assert record["task_status"] == "succeeded" and not record["is_current"]
+    assert record["status"] == "version_conflict" and record["error"]["stage"] == "fill"
+    assert record["download"] is None and not (outputs / CITY_OUTPUT).exists()
+
+    # The CLI must write the same terminal receipt and return a nonzero status.
+    class LocalClient:
+        def __init__(self, **kwargs):
+            self.client = InterleavingClient()
+
+        def __enter__(self):
+            return self.client
+
+        def __exit__(self, *args):
+            return None
+
+    source_path = inputs / CITY_DOC
+    record_path = tmp_path / "early-conflict.json"
+    monkeypatch.setattr(timing_capture.httpx, "Client", LocalClient)
+    monkeypatch.setattr(sys, "argv", ["timing_capture.py", str(source_path),
+                                     "--metrics", "GDP", "--template-name", CITY_TEMPLATE,
+                                     "--output-name", CITY_OUTPUT, "--record", str(record_path)])
+    assert timing_capture.main() == 1
+    assert capsys.readouterr().out
+    assert json.loads(record_path.read_text())["status"] == "version_conflict"
+    standalone = capture(InterleavingClient(), source, CITY_DOC, metrics="GDP", poll_interval=0.01)
+    assert standalone["status"] == standalone["task_status"] == "succeeded"
+    assert standalone["is_current"] is False and standalone["download"] is None
+
+
+def test_score_uses_fill_snapshot_after_new_document_import(tmp_path, monkeypatch):
+    inputs, outputs, database = city_timing_inputs(tmp_path, monkeypatch)
+    source = (inputs / CITY_DOC).read_bytes()
+    assert TestClient(main.app).post("/extract", files={"file": (CITY_DOC, source)},
+                                     data={"metrics": "GDP"}).status_code == 200
+    publication_id = database.snapshot(CITY_DOC, with_facts=True)[3]
+    newer = Document(BytesIO(source))
+    newer.add_paragraph("新版补充段落。")
+    stream = BytesIO()
+    newer.save(stream)
+    client = TestClient(main.app)
+    original_score = main.score_filled
+
+    def interleaved_score(doc):
+        imported = client.post("/ingest", files={"file": (CITY_DOC, stream.getvalue())})
+        assert imported.status_code == 200
+        original_score(doc)
+
+    monkeypatch.setattr(main, "score_filled", interleaved_score)
+    filled = client.post("/fill", json={"doc": CITY_DOC, "template": CITY_TEMPLATE,
+                                        "source_sha256": sha256(source).hexdigest(),
+                                        "expected_publication_id": publication_id})
+    assert filled.status_code == 200, filled.text
+    trace = json.loads((outputs / "fill_report.json").read_text())
+    score = json.loads((outputs / "eval_report.json").read_text())
+    assert len(database.blocks(CITY_DOC)) == 2
+    assert trace["block_count"] == score["block_count"] == 1
+    assert trace["publication_id"] == score["publication_id"] == publication_id
+    assert trace["source_sha256"] == score["source_sha256"] == sha256(source).hexdigest()
+    assert "database_sha256" not in score
+    downloaded = client.get("/files", params={"name": CITY_OUTPUT,
+                                               "result_id": filled.headers["X-A23-Result-ID"]})
+    assert downloaded.status_code == 200
+    book = load_workbook(BytesIO(downloaded.content))
+    try:
+        assert book.active["B2"].value == 100 and book.active["C2"].value is None
+    finally:
+        book.close()
+
+
+def test_fixed_cli_records_fill_download_and_poll_failures(tmp_path, monkeypatch, capsys):
+    inputs, outputs, _ = city_timing_inputs(tmp_path, monkeypatch)
+    inner = TestClient(main.app)
+    source = inputs / CITY_DOC
+
+    class LocalClient:
+        fail_download = False
+
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def post(self, path, **kwargs):
+            return inner.post(path, **kwargs)
+
+        def get(self, path, **kwargs):
+            if self.fail_download and path == "/files":
+                return httpx.Response(404, json={"detail": "受控下载失败"})
+            return inner.get(path, **kwargs)
+
+    monkeypatch.setattr(timing_capture.httpx, "Client", LocalClient)
+    for label, template, timeout, expected_status, expected_stage, expected_exit in (
+        ("fill", "不存在.xlsx", "10", "failed", "fill", 1),
+        ("download", CITY_TEMPLATE, "10", "failed", "download", 1),
+        ("poll", CITY_TEMPLATE, "0.000001", "timed_out", "poll", 2),
+    ):
+        LocalClient.fail_download = label == "download"
+        record_path = tmp_path / f"{label}.json"
+        monkeypatch.setattr(sys, "argv", ["timing_capture.py", str(source), "--metrics", "GDP",
+                                         "--template-name", template, "--output-name", CITY_OUTPUT,
+                                         "--timeout", timeout, "--record", str(record_path)])
+        assert timing_capture.main() == expected_exit
+        record = json.loads(record_path.read_text())
+        assert record["status"] == expected_status and record["error"]["stage"] == expected_stage
+        assert record["task_id"] and record["first_response_seconds"] is not None
+        if label == "fill":
+            assert record["error"]["http_status"] == 400
+            assert record["fill_request_seconds"] is not None and record["download"] is None
+        elif label == "download":
+            assert record["error"]["http_status"] == 404
+            assert record["download_request_seconds"] is not None and record["download"] is None
+        else:
+            assert record["terminal_observed_seconds"] is not None and record["download"] is None
+    assert capsys.readouterr().out
 
 
 def test_fixed_timing_rejects_replaced_download_even_with_identical_cells(tmp_path, monkeypatch):
@@ -287,6 +433,44 @@ def test_uploaded_template_transport_timeout_records_stage(tmp_path):
         assert record["status"] == "timed_out"
         assert record["error"]["stage"] == stage
         assert record["download"] is None and not destination.exists()
+
+
+def test_uploaded_template_stream_stops_at_total_deadline(tmp_path):
+    class FakeClock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = FakeClock()
+    received = []
+    inner = TestClient(main.app)
+
+    class StreamingResponse:
+        status_code = 200
+
+        def iter_bytes(self):
+            for index in range(6):
+                clock.value += 0.05
+                received.append(index)
+                yield b"part"
+
+    class StreamingClient:
+        def post(self, path, **kwargs):
+            return inner.post(path, **kwargs)
+
+        @contextmanager
+        def stream(self, method, path, **kwargs):
+            assert method == "GET" and path.startswith("/operations/files/")
+            yield StreamingResponse()
+
+    destination = tmp_path / "不应下载.xlsx"
+    record = capture_uploaded_xlsx(StreamingClient(), synthetic_source(), "源.xlsx",
+                                   seven_column_template(), "目标.xlsx", "目标", XLSX_MAPPING,
+                                   download_to=destination, timeout=0.15, clock=clock)
+    assert record["status"] == "timed_out" and record["error"]["stage"] == "download"
+    assert 2 <= len(received) < 6 and record["download"] is None
+    assert not destination.exists()
 
 
 def test_uploaded_template_cli_writes_blocked_sheet_record(tmp_path, monkeypatch, capsys):

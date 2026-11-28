@@ -155,21 +155,24 @@ def verify_trace(store: Store, path: Path, locators: list[dict], columns: int) -
     return report
 
 
-def source_score(trace: dict, audit: dict, daily: bool, database_sha256: str) -> dict:
+def source_score(trace: dict, audit: dict, daily: bool, database_sha256: str | None) -> dict:
     score = {
         key: trace[key] for key in (
             "doc", "file", "result_id", "source_sha256", "template_sha256",
             "run_id", "workbook_sha256", "rows", "cells_written", "cells_empty", "block_count",
-            "fill_seconds", "refusal_counts",
+            "fill_seconds", "refusal_counts", "publication_id",
         ) if key in trace
     }
     score.update({
         "basis": "independent-source-check", "diff": audit["differences"],
-        "database_sha256": database_sha256,
         "expected_empty": audit["source_empty"], "false_fills": audit["false_fills"],
         "missed": audit["missed"],
         "wrong_values": sum(item["decision"] == "值不符" for item in audit["differences"]),
     })
+    if database_sha256 is not None:
+        score["database_sha256"] = database_sha256
+    else:
+        score["database_status"] = "changed_after_fill"
     if daily:
         required, empty = audit["source_nonempty"], audit["source_empty"]
         score.update({
@@ -202,7 +205,13 @@ def score_published_fill(root: Path, directory: Path, store: Store, file: str, d
         return
     expected, _ = daily_expected(source_path) if daily else city_expected(source_path)
     audit = verify_workbook(directory / file, expected, 7 if daily else 5)
-    score = source_score(trace, audit, daily, hashlib.sha256(store.path.read_bytes()).hexdigest())
+    database_sha256 = hashlib.sha256(store.path.read_bytes()).hexdigest()
+    current = store.snapshot(doc, with_facts=False)
+    if current is None or (hashlib.sha256(current[0]).hexdigest(), current[3]) != (
+        trace["source_sha256"], trace.get("publication_id")
+    ):
+        database_sha256 = None
+    score = source_score(trace, audit, daily, database_sha256)
     write_json(directory / report_name, score)
 
 

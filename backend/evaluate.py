@@ -52,7 +52,7 @@ def scoring_origin(filled: Path, content: bytes, doc: str) -> dict:
     return {
         key: trace[key] for key in (
             "result_id", "run_id", "source_sha256", "template_sha256", "workbook_sha256",
-            "fill_seconds", "refusal_counts",
+            "fill_seconds", "refusal_counts", "block_count", "publication_id",
         ) if key in trace
     }
 
