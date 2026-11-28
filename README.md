@@ -100,6 +100,8 @@ $env:A23_SYNTHETIC_REFERENCE = "1"
 
 可用 `backend/timing_capture.py` 对一次异步识别作客户端计时；可选固定 01/03 模板填写及下载。完成上面的合成样例启动后，例：`.venv/bin/python backend/timing_capture.py backend/data/demo/doc/合成逐日统计.xlsx --template-name 模板_合成逐日.xlsx --output-name filled_covid19_byday.xlsx --record /tmp/a23-timing.json`。不填两个模板参数时只记录识别。JSON 中 `first_response_seconds` 是提交到任务 ID 首响，`terminal_observed_seconds` 是提交到轮询观察到终态；`queue_seconds` 和 `run_seconds` 按服务端时间戳计算；`fill_request_seconds`、`download_request_seconds` 为各请求耗时，`fill_response_seconds`、`download_complete_seconds` 为从最初提交起的累计时间。记录任务和当前原文摘要、结果文件摘要，以便核对版本。该脚本的固定模板链路从原文提交开始，不能充作赛题“模板上传/启动到完成填写”的正式 90 秒计时。正式五套模板、参考结果和赛方计时边界仍需取得后独立测量。真实调用会消耗 DeepSeek 额度；自动化测试只用模型替身。
 
+对已支持的 03 形态上传 XLSX，可在计时前写好已复核的目标列映射 JSON，例如 `{"A":"date","B":"country","C":"continent","D":"gdp_per_capita","E":"population","F":"每日检测数","G":"病例数"}`。运行 `.venv/bin/python backend/timing_capture.py 源.xlsx --uploaded-xlsx-template 目标.xlsx --template-sheet 目标 --mapping-json 映射.json --download-to /tmp/a23-filled.xlsx --record /tmp/a23-template-timing.json`。计时起点是 `POST /templates/xlsx/inspect` 发起上传，`fill_complete_seconds` 为确认映射后填写响应到达的累计时间，`download_complete_seconds` 包括副本下载；记录源表、模板、映射和下载文件摘要，预览或填写失败会留下阶段、HTTP 状态和理由。此接口会在预览和填写时各上传一次源表，因此其计时包含源表重传。它为正式材料提供可复用的采集方式，但目前只覆盖 03 形态，不能代替赛题五套模板的实测与评分。
+
 ## 自然语言操作
 
 在工作台「自然语言操作」选择不超过 12 MB 的 DOCX 或 XLSX，输入中文指令后点「识别并预览」。预览会把文档内容及指令发送到已配置的 DeepSeek，页面先询问是否继续。核对操作列表中的目标位置、原内容和预期结果，再点「确认并执行」。成功后逐项显示执行结果，编辑或排版任务可下载文件副本。提取任务直接显示原文和第几段或工作表单元格位置。
